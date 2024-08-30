@@ -1,0 +1,9 @@
+[submodule "EQNet"]
+	path = EQNet
+	url = git@github.com:IES-ESLab/EQNet.git
+[submodule "GaMMA"]
+	path = GaMMA
+	url = git@github.com:IES-ESLab/GaMMA.git
+[submodule "PhaseNet"]
+	path = PhaseNet
+	url = git@github.com:IES-ESLab/PhaseNet.git
