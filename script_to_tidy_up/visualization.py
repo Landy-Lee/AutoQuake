@@ -11,6 +11,7 @@ from matplotlib.colors import LightSource
 from cartopy.mpl.geoaxes import GeoAxes
 from pathlib import Path
 from typing import Any
+from multiprocessing import Pool
 
 def h3dd_time_trans(x: str):
     return int(x[:2])*3600 + int(x[2:4])*60 + int(x[4:6]) + float(f"0.{x[6:]}")
@@ -21,23 +22,74 @@ def station_mask(df: pd.DataFrame):
     """
     return df['station'].str[1].str.isdigit()
 
+def check_hms_h3dd(hms: str):
+    """
+    check whether the second overflow
+    """
+    minute = int(hms[2:4])
+    second = int(hms[4:6])
+
+    if second >= 60:
+        minute += second // 60
+        second = second % 60
+    
+    fixed_hms = hms[:2] + f"{minute:02d}" + f"{second:02d}" + hms[6:]
+    return fixed_hms
+
+def check_hms_gafocal(hms: str):
+    """
+    check whether the second overflow
+    """
+    minute = int(hms[3:5])
+    second = int(hms[6:8])
+
+    if second >= 60:
+        minute += second // 60
+        second = second % 60
+    
+    fixed_hms = hms[:3] + f"{minute:02d}" + hms[5:6] + f"{second:02d}"
+    return fixed_hms
+
+def txt_preprocessor(df):
+    """
+    Distinguish h3dd and gafocal format through YYYYMMDD & YYYY/MM/DD.
+    """
+    if len(df[0].iloc[0]) == 8:
+        df[1] = df[1].apply(check_hms_h3dd)
+        df['time'] = df[0].apply(lambda x: f"{x[:4]}-{x[4:6]}-{x[6:8]}") + "T" + df[1].apply(lambda x: f"{x[:2]}:{x[2:4]}:{x[4:6]}.{x[6:8]}")
+        df = df.rename(columns={2: 'latitude', 3: 'longitude', 4: 'depth_km'})
+        mask = [i for i in df.columns.tolist() if isinstance(i, str)]
+        df = df[mask]
+        return df
+    elif "/" in df[0].iloc[0]:
+        df[1] = df[1].apply(check_hms_gafocal)
+        df['time'] = df[0].apply(lambda x: x.replace("/", "-")) + "T" + df[1]
+        df = df.rename(columns={2: 'longitude', 3: 'latitude', 4: 'depth_km'})
+        mask = [i for i in df.columns.tolist() if isinstance(i, str)]
+        df = df[mask]
+        return df
+    else:
+        raise ValueError(f"Unrecognized date format: {df[0].iloc[0]}")
+    
 def check_format(catalog: dict[int, dict[str, Any]], i):
     if catalog[i]['catalog'].suffix == '.csv':
         df = pd.read_csv(catalog[i]['catalog'])
-        timestamp = df["time"].apply(lambda x: datetime.fromisoformat(x).timestamp()).to_numpy()
     else:
-        use_cols = [0,1,2,3,4,5]
-        col_name = ['ymd', 'hms', 'latitude', 'longitude', 'depth_km', 'mag']
-        df = pd.read_csv(catalog[i]['catalog'], sep='\s+', header=None, usecols=use_cols, dtype={1: 'str'}, names=col_name)
-        timestamp = df["hms"].apply(h3dd_time_trans).to_numpy()
+        df = pd.read_csv(catalog[i]['catalog'], sep='\s+', header=None, dtype={0: 'str', 1: 'str'})
+        df = txt_preprocessor(df)
+    timestamp = df["time"].apply(lambda x: datetime.fromisoformat(x).timestamp()).to_numpy()
     return df, timestamp
 
-def status_message_and_fig_name(catalog_list: list[Path], name_list: list[str], use_ori: bool, use_both: bool, use_common: bool, use_main: bool) -> str:
+def status_message_and_fig_name(catalog_list: list[Path], name_list: list[str], **options: dict[str, bool]) -> str:
     """
     print the status message and decide the fig name to save
     """
     print(f"Main catalog: {name_list[0]}({catalog_list[0]})\nCompared catalog: {name_list[1]}({catalog_list[1]})\n")
     print("CURRENT STATUS:")
+    use_ori = options.get('use_ori', False)
+    use_both = options.get('use_both', False)
+    use_common = options.get('use_common', False)
+    use_main = options.get('use_main', False)
     if use_ori:
         if use_both:
             print(f"Using both catalog to plot the original distribution")
@@ -112,18 +164,14 @@ def plot_ori(catalog: dict[int, dict[str, Any]], catalog_range: dict[str, float]
     else:
         key_list = [1]
     for i in key_list:
-        if catalog[i]['catalog'].suffix == '.csv':
-            catalog_df = pd.read_csv(catalog[i]["catalog"])
-        else:
-            col_name = ["ymd", "total_seconds", "latitude", "longitude", "depth_km", "par_1", "par_2", "par_3", "par_4", "par_5", "par_51"]
-            catalog_df = pd.read_csv(catalog[i]["catalog"], sep='\s+', header=None, names=col_name)
+        catalog_df, _ = check_format(catalog=catalog, i=i)
         equip = catalog[i]["name"]
-
+        
         # cmap = "viridis"
         catalog_df = catalog_filter(
             catalog_df=catalog_df, catalog_range=catalog_range
         )
-
+        
         geo_ax.scatter(
             catalog_df["longitude"],
             catalog_df["latitude"],
@@ -254,11 +302,15 @@ def plot_station(all_station_info: Path, geo_ax):
         
 def plot_distribution(catalog: dict[int, dict[str, Any]], all_station_info: Path,
                       map_range: dict[str, float], catalog_range: dict[str, float], tol: int,
-                      use_ori: bool, use_both: bool, use_common: bool, use_main: bool, figure_name: str
+                      figure_name: str, **options: dict[str, bool]
                       ) -> None:
     """
     main ploting function
     """
+    use_ori = options.get('use_ori', False)
+    use_both = options.get('use_both', False)
+    use_common = options.get('use_common', False)
+    use_main = options.get('use_main', False)
     params = {
         "font.size": 18,
         "axes.labelsize": 18,
@@ -362,10 +414,22 @@ def plot_distribution(catalog: dict[int, dict[str, Any]], all_station_info: Path
     # *** haven't finish the customized figure_name
     plt.savefig(figure_path / figure_name) # using fig.savefig when we have several figs.
 
+# Function to execute in parallel
+def process_data(catalog_list, name_list, catalog_dict, all_station_info,
+                 map_range, catalog_range, tol, options):
+    # Unpack options
+    figure_name = status_message_and_fig_name(
+        catalog_list=catalog_list, name_list=name_list, **options
+    )
+
+    plot_distribution(
+        catalog=catalog_dict, all_station_info=all_station_info,
+        map_range=map_range, catalog_range=catalog_range,
+        tol=tol, figure_name=figure_name, **options
+    )
+    return f"complete with {figure_name}"
+
 if __name__ == '__main__':
-    # output setting
-    figure_path = Path('/home/patrick/Work/EQNet/tests/hualien_0403/compare')
-    figure_path.mkdir(parents=True, exist_ok=True)
     # station
     seis_station_info = Path("/home/patrick/Work/EQNet/tests/hualien_0403/station_seis.csv")
     all_station_info = Path("/home/patrick/Work/EQNet/tests/hualien_0403/station_all.csv")
@@ -379,14 +443,18 @@ if __name__ == '__main__':
     # h3dd catalog
     combined_h3dd = Path("/home/patrick/Work/AutoQuake/Reloc2/seis_das_whole.dat_ch.hout")
     seis_h3dd = Path("/home/patrick/Work/EQNet/tests/hualien_0403/20240403.hout")
+
     # 2024/04/01-2024/04/17 mag catalog from CWA, comparing it to GaMMA
     figure_path = Path('/home/patrick/Work/playground/cwa_gamma/5s/fig')
+    figure_path.mkdir(parents=True, exist_ok=True)
     cwa_all = Path("/home/patrick/Work/playground/cwa_gamma/cwa_all.csv")
     gamma_all = Path("/home/patrick/Work/playground/cwa_gamma/gamma_all.csv")
+    cwa_gafocal = Path("/home/patrick/Work/playground/cwb_gafocal_20240401_20240417_results.txt")
+    gamma_gafocal = Path("/home/patrick/Work/playground/gamma_gafocal_20240401_20240417_results.txt")
 
     # packing the data, you can only put 1 in it.
-    catalog_list = [gamma_all, cwa_all] # [the main catalog, another catalog you want to compare]
-    name_list = ["GaMMA(0401-0417)", "CWA(0401-0417)"] # ["name of main catalog", "name of compared catalog"]
+    catalog_list = [gamma_gafocal, cwa_gafocal] # [the main catalog, another catalog you want to compare]
+    name_list = ["GaMMA(gafocal)", "CWA(gafocal)"] # ["name of main catalog", "name of compared catalog"]
     catalog_dict = pack(catalog_list, name_list) # pack it as a dictionary
 
     # map range on axes
@@ -411,6 +479,30 @@ if __name__ == '__main__':
     # time residual between main event and event being compared.
     tol = 5
 
+    # multiprocessing
+    options_list = [
+        {'use_ori': True, 'use_both': True},
+        {'use_ori': True, 'use_both': False, 'use_main': True},
+        {'use_ori': True, 'use_both': False, 'use_main': False},
+        {'use_ori': False, 'use_both': True, 'use_common': True},
+        {'use_ori': False, 'use_both': False, 'use_common': True, 'use_main': True},
+        {'use_ori': False, 'use_both': False, 'use_common': True, 'use_main': False},
+        {'use_ori': False, 'use_both': True, 'use_common': False},
+        {'use_ori': False, 'use_both': False, 'use_common': False, 'use_main': True},
+        {'use_ori': False, 'use_both': False, 'use_common': False, 'use_main': False}
+    ]
+    with Pool(processes=9) as pool:
+        results = pool.starmap(
+            process_data,
+            [(catalog_list, name_list, catalog_dict, seis_station_info, map_range, catalog_range, tol, options)
+             for options in options_list]
+        )
+
+    for result in results:
+        print(result)
+
+
+    # run it separately
     # Scenarios
     '''
     example scenario: plot only the compared catalog unique events distribution
@@ -419,23 +511,23 @@ if __name__ == '__main__':
     use_common = False (common/unique)
     use_main = False (main/compared)
     '''
-    use_ori =  True
-    use_both = True
-    use_common =  False
-    use_main = False
-
-    # status check and figure name decide.
-    figure_name = status_message_and_fig_name(
-        catalog_list=catalog_list, name_list=name_list,
-        use_ori=use_ori, use_both=use_both,
-        use_common=use_common, use_main=use_main
-        )
+    # options = {
+    #     'use_ori': True,
+    #     'use_both': False,
+    #     'use_common': True,
+    #     'use_main': False
+    # }
     
-    # main program
-    plot_distribution(
-        catalog=catalog_dict, all_station_info=all_station_info,
-        map_range=map_range, catalog_range=catalog_range,
-        tol=tol, use_ori=use_ori, use_both=use_both,
-        use_common=use_common, use_main=use_main, figure_name=figure_name
-        )
+    # # status check and figure name decide.
+    # figure_name = status_message_and_fig_name(
+    #     catalog_list=catalog_list, name_list=name_list,
+    #     **options
+    #     )
+    
+    # # main program
+    # plot_distribution(
+    #     catalog=catalog_dict, all_station_info=all_station_info,
+    #     map_range=map_range, catalog_range=catalog_range,
+    #     tol=tol, figure_name=figure_name, **options
+    #     )
 # %%
