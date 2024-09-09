@@ -80,7 +80,7 @@ def check_format(catalog: dict[int, dict[str, Any]], i):
     timestamp = df["time"].apply(lambda x: datetime.fromisoformat(x).timestamp()).to_numpy()
     return df, timestamp
 
-def status_message_and_fig_name(catalog_list: list[Path], name_list: list[str], **options: dict[str, bool]) -> str:
+def status_message_and_fig_name(catalog_list: list[Path], name_list: list[str], figure_parent_dir: Path, **options: dict[str, bool]) -> Path:
     """
     print the status message and decide the fig name to save
     """
@@ -90,39 +90,41 @@ def status_message_and_fig_name(catalog_list: list[Path], name_list: list[str], 
     use_both = options.get('use_both', False)
     use_common = options.get('use_common', False)
     use_main = options.get('use_main', False)
+    figure_dir = figure_parent_dir / f"{name_list[0]}_{name_list[1]}"
+    figure_dir.mkdir(parents=True, exist_ok=True)
     if use_ori:
         if use_both:
             print(f"Using both catalog to plot the original distribution")
-            return f"{name_list[0]}_{name_list[1]}_ori.png"
+            return figure_dir / f"{name_list[0]}_{name_list[1]}_ori.png"
         else:
             if use_main:
                 print(f"Using {name_list[0]} catalog to plot the original distribution")
-                return f"{name_list[0]}_ori.png"
+                return figure_dir / f"{name_list[0]}_ori.png"
             else:
                 print(f"Using {name_list[1]} catalog to plot the original distribution")
-                return f"{name_list[1]}_ori.png"
+                return figure_dir / f"{name_list[1]}_ori.png"
     elif use_both:
         if use_common:
             print(f"Using both catalog to plot the common events distribution")
-            return f"{name_list[0]}_{name_list[1]}_common.png"
+            return figure_dir / f"{name_list[0]}_{name_list[1]}_common.png"
         else:
             print(f"Using both catalog to plot the unique events distribution")
-            return f"{name_list[0]}_{name_list[1]}_only.png"
+            return figure_dir / f"{name_list[0]}_{name_list[1]}_only.png"
     else:
         if use_common:
             if use_main:
                 print(f"Using {name_list[0]} catalog to plot the common events distribution")
-                return f"{name_list[0]}_common.png"
+                return figure_dir / f"{name_list[0]}_common.png"
             else:
                 print(f"Using {name_list[1]} catalog to plot the common events distribution")
-                return f"{name_list[1]}_common.png"
+                return figure_dir / f"{name_list[1]}_common.png"
         else:
             if use_main:
                 print(f"Using {name_list[0]} catalog to plot the unique events distribution")
-                return f"{name_list[0]}_only.png"
+                return figure_dir / f"{name_list[0]}_only.png"
             else:
                 print(f"Using {name_list[1]} catalog to plot the unique events distribution")
-                return f"{name_list[1]}_only.png"
+                return figure_dir / f"{name_list[1]}_only.png"
 
 def catalog_compare(catalog: dict[int, dict[str, Any]], tol: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     df_main, timestamp_main = check_format(catalog=catalog, i=0)
@@ -302,7 +304,7 @@ def plot_station(all_station_info: Path, geo_ax):
         
 def plot_distribution(catalog: dict[int, dict[str, Any]], all_station_info: Path,
                       map_range: dict[str, float], catalog_range: dict[str, float], tol: int,
-                      figure_name: str, **options: dict[str, bool]
+                      figure_path: Path, **options: dict[str, bool]
                       ) -> None:
     """
     main ploting function
@@ -411,25 +413,27 @@ def plot_distribution(catalog: dict[int, dict[str, Any]], all_station_info: Path
     axes[1, 1].axis('off')
     axes[0, 0].axis('off')
     plt.tight_layout()
-    # *** haven't finish the customized figure_name
-    plt.savefig(figure_path / figure_name) # using fig.savefig when we have several figs.
+    # *** haven't finish the customized figure_path
+    plt.savefig(figure_path) # using fig.savefig when we have several figs.
 
 # Function to execute in parallel
-def process_data(catalog_list, name_list, catalog_dict, all_station_info,
+def process_data(figure_parent_dir, catalog_list, name_list, catalog_dict, all_station_info,
                  map_range, catalog_range, tol, options):
     # Unpack options
-    figure_name = status_message_and_fig_name(
-        catalog_list=catalog_list, name_list=name_list, **options
+    figure_path = status_message_and_fig_name(
+        catalog_list=catalog_list, name_list=name_list, figure_parent_dir= figure_parent_dir, **options
     )
 
     plot_distribution(
         catalog=catalog_dict, all_station_info=all_station_info,
         map_range=map_range, catalog_range=catalog_range,
-        tol=tol, figure_name=figure_name, **options
+        tol=tol, figure_path=figure_path, **options
     )
-    return f"complete with {figure_name}"
+    return f"complete with {figure_path}"
 
 if __name__ == '__main__':
+    figure_parent_dir = Path('/home/patrick/Work/playground/cwa_gamma/5s/fig')
+    figure_parent_dir.mkdir(parents=True, exist_ok=True)
     # station
     seis_station_info = Path("/home/patrick/Work/EQNet/tests/hualien_0403/station_seis.csv")
     all_station_info = Path("/home/patrick/Work/EQNet/tests/hualien_0403/station_all.csv")
@@ -445,16 +449,14 @@ if __name__ == '__main__':
     seis_h3dd = Path("/home/patrick/Work/EQNet/tests/hualien_0403/20240403.hout")
 
     # 2024/04/01-2024/04/17 mag catalog from CWA, comparing it to GaMMA
-    figure_path = Path('/home/patrick/Work/playground/cwa_gamma/5s/fig')
-    figure_path.mkdir(parents=True, exist_ok=True)
     cwa_all = Path("/home/patrick/Work/playground/cwa_gamma/cwa_all.csv")
     gamma_all = Path("/home/patrick/Work/playground/cwa_gamma/gamma_all.csv")
     cwa_gafocal = Path("/home/patrick/Work/playground/cwb_gafocal_20240401_20240417_results.txt")
     gamma_gafocal = Path("/home/patrick/Work/playground/gamma_gafocal_20240401_20240417_results.txt")
 
     # packing the data, you can only put 1 in it.
-    catalog_list = [gamma_gafocal, cwa_gafocal] # [the main catalog, another catalog you want to compare]
-    name_list = ["GaMMA(gafocal)", "CWA(gafocal)"] # ["name of main catalog", "name of compared catalog"]
+    catalog_list = [cwa_all, cwa_gafocal] # [the main catalog, another catalog you want to compare]
+    name_list = ["CWA(0401-0417)", "CWA(gafocal)"] # ["name of main catalog", "name of compared catalog"]
     catalog_dict = pack(catalog_list, name_list) # pack it as a dictionary
 
     # map range on axes
@@ -494,7 +496,7 @@ if __name__ == '__main__':
     with Pool(processes=9) as pool:
         results = pool.starmap(
             process_data,
-            [(catalog_list, name_list, catalog_dict, seis_station_info, map_range, catalog_range, tol, options)
+            [(figure_parent_dir, catalog_list, name_list, catalog_dict, seis_station_info, map_range, catalog_range, tol, options)
              for options in options_list]
         )
 
@@ -519,7 +521,7 @@ if __name__ == '__main__':
     # }
     
     # # status check and figure name decide.
-    # figure_name = status_message_and_fig_name(
+    # figure_path = status_message_and_fig_name(
     #     catalog_list=catalog_list, name_list=name_list,
     #     **options
     #     )
@@ -528,6 +530,6 @@ if __name__ == '__main__':
     # plot_distribution(
     #     catalog=catalog_dict, all_station_info=all_station_info,
     #     map_range=map_range, catalog_range=catalog_range,
-    #     tol=tol, figure_name=figure_name, **options
+    #     tol=tol, figure_path=figure_path, **options
     #     )
 # %%
