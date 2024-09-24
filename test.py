@@ -17,13 +17,13 @@ import multiprocessing as mp
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
-from obspy import read, UTCDateTime
+from obspy import read, UTCDateTime, Trace
 from obspy.imaging.beachball import beach
 from geopy.distance import geodesic
 from collections import defaultdict
 from pyrocko import moment_tensor as pmt
 from pyrocko.plot import beachball, mpl_color
-from autoquake.visualization import catalog_compare, pack, check_format
+from autoquake.visualization import catalog_compare, pack, check_format, station_mask
 
 normalize = lambda x: (x - np.mean(x, axis=-1, keepdims=True)) / np.std(x, axis=-1, keepdims=True)
 
@@ -196,7 +196,8 @@ def preprocess_gamma_csv(gamma_catalog: Path, gamma_picks: Path,
 
     df_picks = pd.read_csv(gamma_picks)
     df_event_picks = df_picks[df_picks['event_index'] == event_i].copy()
-    df_event_picks['station_id'] = df_event_picks['station_id'].map(lambda x: str(x).split('.')[1])
+    # TODO: does there have any possible scenario?
+    # df_event_picks['station_id'] = df_event_picks['station_id'].map(lambda x: str(x).split('.')[1])
     df_event_picks.loc[:, 'phase_time'] = pd.to_datetime(df_event_picks['phase_time'])
     
     return df_event, event_dict, df_event_picks
@@ -210,6 +211,71 @@ def process_phasenet_csv(phasenet_picks_parent: Path, date: str):
     df_all_picks['station'] = df_all_picks['station_id'].apply(lambda x: str(x).split('.')[1]) # LONT (station name) or A001 (channel name)
     return df_all_picks
 
+def find_das_data(event_index: int, hdf5_parent_dir: Path, polarity_picks: Path,
+                  interval=300, train_window=0.64, visual_window=2,
+                  sampling_rate=100):
+    """
+    temp function, disentangle is needed.
+    """
+    df_pol = pd.read_csv(polarity_picks)
+    df_pol.rename(columns={'station_id': 'station'}, inplace=True)
+    df_pol_clean = df_pol[df_pol["event_index"] == event_index]
+    df_pol_clean = df_pol_clean[station_mask(df_pol_clean)]
+    das_plot_dict={}
+    for _, row in df_pol_clean.iterrows():
+        if row.polarity == 'U':
+            polarity = '+'
+        elif row.polarity == 'D':
+            polarity = '-'
+        else:
+            polarity = ' '
+        total_seconds = get_total_seconds(pd.to_datetime(row.phase_time))
+        index = int(total_seconds // interval)
+        window = f"{interval*index}_{interval*(index+1)}.h5"
+        try:
+            file = list(hdf5_parent_dir.glob(f"*{window}"))[0]
+        except IndexError:
+            logging.info(f"File not found for window {window}")
+            
+        channel_index = convert_channel_index(row.station)
+        tr = Trace()
+        try:
+            with h5py.File(file, 'r') as fp:
+                ds = fp["data"]
+                data = ds[channel_index]
+                tr.stats.sampling_rate = 1 / ds.attrs['dt_s']
+                tr.stats.starttime = ds.attrs['begin_time']
+                tr.data = data
+            p_arrival = UTCDateTime(row.phase_time)
+            train_starttime_trim = p_arrival - train_window
+            train_endtime_trim = p_arrival + train_window
+            window_starttime_trim = p_arrival - visual_window
+            window_endtime_trim = p_arrival + visual_window
+            
+            tr.detrend('demean')
+            tr.detrend('linear')
+            tr.filter("bandpass", freqmin=1, freqmax=10)
+            tr.taper(0.001)
+            tr.resample(sampling_rate=sampling_rate)
+            # this is for visualize length
+            tr.trim(starttime=window_starttime_trim, endtime=window_endtime_trim)
+            visual_time = np.arange(0, 2*visual_window+1/sampling_rate, 1/sampling_rate) # using array to ensure the time length as same as time_window.
+            visual_sac = tr.data 
+            # this is actual training length
+            tr.trim(starttime=train_starttime_trim, endtime=train_endtime_trim)
+            start_index = visual_window - train_window
+            train_time = np.arange(start_index, start_index + 2*train_window+1/sampling_rate, 1/sampling_rate) # using array to ensure the time length as same as time_window.
+            train_sac = tr.data
+            # final writing
+            if 'station_info' not in das_plot_dict:
+                das_plot_dict['station_info'] = {}
+            das_plot_dict['station_info'][row.station] = {
+                'polarity': polarity, 'p_arrival': p_arrival, 'visual_time':visual_time,
+                'visual_sac': visual_sac,'train_time':train_time,'train_sac': train_sac
+                }
+        except Exception as e:
+            print(e)
+    return das_plot_dict
 
 def find_sac_data(event_time: str, date: str, event_point: tuple[float, float], 
                  station_list: Path, sac_parent_dir: Path, 
@@ -811,17 +877,17 @@ def plot_polarity_waveform(focal_dict: dict, fig=None, gs=None, n_cols=4,
     n_rows = math.ceil(wavenum / n_cols)
     gs = GridSpec(n_rows, n_cols, left=0, right=0.9, top=0.37, bottom=0, hspace=0.4, wspace=0.05)
     for index, station in enumerate(focal_station_list):
-        polarity = gamma_focal_dict['station_info'][station]['polarity']
+        polarity = focal_dict['station_info'][station]['polarity']
         ii = index // n_cols
         jj = index % n_cols
         ax = fig.add_subplot(gs[ii, jj])
-        x_wide = gamma_focal_dict['station_info'][station]['visual_time']
-        y_wide = gamma_focal_dict['station_info'][station]['visual_sac']
+        x_wide = focal_dict['station_info'][station]['visual_time']
+        y_wide = focal_dict['station_info'][station]['visual_sac']
         ax.plot(x_wide, y_wide, color='k')
         ax.set_xlim(0, visual_window*2)
         ax.grid(True, alpha=0.7)
-        x = gamma_focal_dict['station_info'][station]['train_time']
-        y = gamma_focal_dict['station_info'][station]['train_sac']
+        x = focal_dict['station_info'][station]['train_time']
+        y = focal_dict['station_info'][station]['train_sac']
         ax.plot(x,y, color='r')
         ax.set_title(f"{station}({polarity})", fontsize = 15)
         ax.set_xticklabels([]) # Remove the tick labels but keep the ticks
@@ -1063,7 +1129,12 @@ if __name__ == '__main__':
     # 0403 DAS data
     h5_parent_dir = Path('/raid4/DAS_data/iDAS_MiDAS/hdf5/20240403_hdf5/')
 
-#% ========= For comparing ==========    
+    ## 0403 DAS + Seis in small region
+    das_new_catalog = Path("/home/patrick/Work/EQNet/tests/hualien_0403/gamma_test/test_5/gamma_events.csv")
+    das_new_picks = Path("/home/patrick/Work/EQNet/tests/hualien_0403/gamma_test/test_5/gamma_clean_picks.csv")
+    das_new_station = Path("/home/patrick/Work/EQNet/tests/hualien_0403/new_das_seis_station.csv")
+    polarity_picks = Path("/home/patrick/Work/EQNet/tests/hualien_0403/gamma_test/test_5/gamma_events_polarity.csv")
+#%% ========= For comparing ==========    
     # packing the data, you can only put 1 in it.
     catalog_list = [gamma_gafocal, cwa_gafocal] # [the main catalog, another catalog you want to compare]
     name_list = ["GaMMA(gafocal)", "CWA(gafocal)"] # ["name of main catalog", "name of compared catalog"]
@@ -1073,7 +1144,7 @@ if __name__ == '__main__':
         catalog=catalog_dict,
         tol=5
     )
-#% ========= For beachball ==========    
+#%% ========= For beachball ==========    
     gamma_focal_dict = find_compared_gafocal_polarity(
         gafocal_df=gamma_common, 
         hout_file=hout_file, 
