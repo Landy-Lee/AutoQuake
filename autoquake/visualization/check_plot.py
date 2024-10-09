@@ -7,31 +7,38 @@ import logging
 # from datetime import datetime, timedelta
 from pathlib import Path
 
+import cartopy.crs as ccrs
 import h5py
+import matplotlib.pyplot as plt
 
-# import matplotlib.pyplot as plt
-# from matplotlib.gridspec import GridSpec
 # from matplotlib.ticker import MultipleLocator
 import numpy as np
 import pandas as pd
+import pygmt
+
+# from obspy.imaging.beachball import beach
+from geopy.distance import geodesic
+from matplotlib.colors import LightSource
+from matplotlib.gridspec import GridSpec
+
+# import multiprocessing as mp
+# from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+from obspy import Trace, UTCDateTime, read
 
 # from collections import defaultdict
 # from pyrocko import moment_tensor as pmt
 # from pyrocko.plot import beachball, mpl_color
-from _plot_base import convert_channel_index, get_total_seconds, station_mask
-
-# from obspy.imaging.beachball import beach
-from geopy.distance import geodesic
-
-# import multiprocessing as mp
-# import cartopy.crs as ccrs
-# import cartopy.feature as cfeature
-# from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
-from obspy import Trace, UTCDateTime, read
+from ._plot_base import (
+    check_format,
+    convert_channel_index,
+    get_total_seconds,
+    plot_waveform_check,
+    station_mask,
+)
 
 
 def preprocess_gamma_csv(
-    gamma_catalog: Path, gamma_picks: Path, event_i: int
+    gamma_catalog: Path, gamma_picks: Path, event_i: int, h3dd_hout=None
 ) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
     """
     Preprocessing the DataFrame for each event index.
@@ -54,7 +61,8 @@ def preprocess_gamma_csv(
         The dictionary contains the needed event information.
     df_event_picks : DataFrame
         The DataFrame object of the gamma events i's associated picks.
-
+    h3dd_hout (optional, if you want to use h3dd info) : Path
+        The path of h3dd.hout
     """
     df_catalog = pd.read_csv(gamma_catalog)
     df_event = df_catalog[df_catalog['event_index'] == event_i].copy()
@@ -65,7 +73,11 @@ def preprocess_gamma_csv(
     df_event.loc[:, 'seconds'] = (
         df_event['datetime'].dt.second + df_event['datetime'].dt.microsecond / 1_000_000
     )
-    event_dict = {
+    event_dict = {}
+    event_dict[
+        'gamma'
+    ] = {}  # the reason I don't want to use defaultdict is to limit it.
+    event_dict['gamma'] = {
         'date': df_event['ymd'].iloc[0],
         'event_time': df_event['time'].iloc[0],
         'event_total_seconds': get_total_seconds(df_event['datetime'].iloc[0]),
@@ -74,6 +86,27 @@ def preprocess_gamma_csv(
         'event_point': (df_event['latitude'].iloc[0], df_event['longitude'].iloc[0]),
         'event_depth': df_event['depth_km'].iloc[0],
     }
+    if h3dd_hout is not None:
+        event_dict['h3dd'] = {}
+        df_h3dd, _ = check_format(h3dd_hout)
+        df_h3dd['datetime'] = pd.to_datetime(df_h3dd['time'])
+        df_h3dd['datetime'].map(get_total_seconds)
+        # TODO: Using the first row is not always the correct way. We better have index to reference.
+        target = df_h3dd[
+            abs(
+                df_h3dd['datetime'].map(get_total_seconds)
+                - get_total_seconds(df_event['datetime'].iloc[0])
+            )
+            < 3
+        ].iloc[0]
+        event_dict['h3dd'] = {
+            'event_time': target.time,
+            'event_total_seconds': get_total_seconds(target.datetime),
+            'event_lat': target.latitude,
+            'event_lon': target.longitude,
+            'event_point': (target.latitude, target.longitude),
+            'event_depth': target.depth_km,
+        }
 
     df_picks = pd.read_csv(gamma_picks)
     df_event_picks = df_picks[df_picks['event_index'] == event_i].copy()
@@ -84,9 +117,8 @@ def preprocess_gamma_csv(
     return df_event, event_dict, df_event_picks
 
 
-def process_phasenet_csv(phasenet_picks_parent: Path, date: str):
-    phasenet_picks = list(phasenet_picks_parent.glob(f'*{date}'))[0]
-    df_all_picks = pd.read_csv(phasenet_picks / 'picks.csv')
+def preprocess_phasenet_csv(phasenet_picks: Path):
+    df_all_picks = pd.read_csv(phasenet_picks)
     df_all_picks['phase_time'] = pd.to_datetime(df_all_picks['phase_time'])
     df_all_picks['total_seconds'] = df_all_picks['phase_time'].apply(get_total_seconds)
     df_all_picks['system'] = df_all_picks['station_id'].apply(
@@ -351,3 +383,293 @@ def find_gamma_pick(
         )
 
     return df_seis_aso_picks, df_das_aso_picks
+
+
+def get_mapview(region, ax):
+    topo = (
+        pygmt.datasets.load_earth_relief(resolution='15s', region=region).to_numpy()
+        / 1e3
+    )  # km
+    x = np.linspace(region[0], region[1], topo.shape[1])
+    y = np.linspace(region[2], region[3], topo.shape[0])
+    dx, dy = 1, 1
+    xgrid, ygrid = np.meshgrid(x, y)
+    ls = LightSource(azdeg=0, altdeg=45)
+    ax.pcolormesh(
+        xgrid,
+        ygrid,
+        ls.hillshade(topo, vert_exag=10, dx=dx, dy=dy),
+        vmin=-1,
+        shading='gouraud',
+        cmap='gray',
+        alpha=1.0,
+        antialiased=True,
+        rasterized=True,
+    )
+    # cartopy setting
+    ax.coastlines()
+    ax.set_extent(region)
+
+
+def plot_map(
+    station: Path,
+    event_dict: dict,
+    df_event_picks: pd.DataFrame,
+    seis_ax=None,
+    das_ax=None,
+    seis_region=None,
+    das_region=None,
+    use_gamma=True,
+    use_h3dd=False,
+):
+    map_proj = ccrs.PlateCarree()
+    # tick_proj = ccrs.PlateCarree()
+    if seis_ax is None and das_ax is None:
+        fig = plt.figure(figsize=(8, 12))
+        gs = GridSpec(2, 1, height_ratios=[3, 1])
+    df_station = pd.read_csv(station)
+    df_seis_station = df_station[df_station['station'].map(station_mask)]
+    df_das_station = df_station[~df_station['station'].map(station_mask)]
+    if not df_seis_station.empty:
+        if seis_ax is None:
+            seis_ax = fig.add_subplot(gs[0], projection=map_proj)
+        if seis_region is None:
+            seis_region = [
+                df_seis_station['longitude'].min() - 0.5,
+                df_seis_station['longitude'].max() + 0.5,
+                df_seis_station['latitude'].min() - 0.5,
+                df_seis_station['latitude'].max() + 0.5,
+            ]
+        get_mapview(seis_region, seis_ax)
+        seis_ax.scatter(
+            x=df_seis_station['longitude'],
+            y=df_seis_station['latitude'],
+            marker='^',
+            color='silver',
+            edgecolors='k',
+            s=50,
+            zorder=2,
+        )
+        if use_gamma:
+            seis_ax.scatter(
+                x=event_dict['gamma']['event_lon'],
+                y=event_dict['gamma']['event_lat'],
+                marker='*',
+                color='r',
+                s=100,
+                zorder=4,
+                label='GaMMA',
+            )
+        if use_h3dd:
+            seis_ax.scatter(
+                x=event_dict['h3dd']['event_lon'],
+                y=event_dict['h3dd']['event_lat'],
+                marker='*',
+                color='b',
+                s=100,
+                zorder=4,
+                label='H3DD',
+            )
+        seis_ax.legend()
+        for sta in df_event_picks[df_event_picks['station_id'].map(station_mask)][
+            'station_id'
+        ].unique():
+            seis_ax.scatter(
+                x=df_seis_station[df_seis_station['station'] == sta]['longitude'],
+                y=df_seis_station[df_seis_station['station'] == sta]['latitude'],
+                marker='^',
+                color='darkorange',
+                edgecolors='k',
+                s=50,
+                zorder=3,
+            )
+        seis_gl = seis_ax.gridlines(draw_labels=True)
+        seis_gl.top_labels = False  # Turn off top labels
+        seis_gl.right_labels = False
+        seis_ax.autoscale(tight=True)
+        seis_ax.set_aspect('auto')
+    if not df_das_station.empty:
+        if das_ax is None:
+            das_ax = fig.add_subplot(gs[1], projection=map_proj)
+        if das_region is None:
+            das_region = [
+                df_das_station['longitude'].min() - 0.01,
+                df_das_station['longitude'].max() + 0.01,
+                df_das_station['latitude'].min() - 0.01,
+                df_das_station['latitude'].max() + 0.01,
+            ]
+        get_mapview(das_region, das_ax)
+        das_ax.scatter(
+            x=df_das_station['longitude'],
+            y=df_das_station['latitude'],
+            marker='.',
+            color='silver',
+            s=5,
+            zorder=2,
+        )
+        if use_gamma:
+            das_ax.scatter(
+                x=event_dict['gamma']['event_lon'],
+                y=event_dict['gamma']['event_lat'],
+                marker='*',
+                color='r',
+                s=100,
+                zorder=4,
+                label='GaMMA',
+            )
+        if use_h3dd:
+            das_ax.scatter(
+                x=event_dict['h3dd']['event_lon'],
+                y=event_dict['h3dd']['event_lat'],
+                marker='*',
+                color='b',
+                s=100,
+                zorder=4,
+                label='H3DD',
+            )
+        das_ax.legend()
+        for sta in df_event_picks[~df_event_picks['station_id'].map(station_mask)][
+            'station_id'
+        ].unique():
+            das_ax.scatter(
+                x=df_das_station[df_das_station['station'] == sta]['longitude'],
+                y=df_das_station[df_das_station['station'] == sta]['latitude'],
+                marker='.',
+                color='darkorange',
+                s=5,
+                zorder=3,
+            )
+        das_gl = das_ax.gridlines(draw_labels=True)
+        das_gl.top_labels = False  # Turn off top labels
+        das_gl.right_labels = False
+        # das_ax.autoscale(tight=True)
+        # das_ax.set_aspect('auto')
+
+
+def return_none_if_empty(df):
+    if df.empty:
+        return None
+    return df
+
+
+def plot_asso(
+    phasenet_picks: Path,
+    gamma_picks: Path,
+    gamma_events: Path,
+    station: Path,
+    event_i: int,
+    fig_dir: Path,
+    h3dd_hout=None,
+    amplify_index=5,
+    sac_parent_dir=None,
+    sac_dir_name=None,
+    h5_parent_dir=None,
+    parallel=False,
+    df_all_picks=None,
+):
+    """
+    Plotting the gamma and h3dd info.
+
+    Args:
+        phasenet_picks (Path): Path to the phasenet picks.
+        gamma_picks (Path): Path to the gamma picks.
+        gamma_events (Path): Path to the gamma events.
+        station (Path): Path to the station info.
+        event_i (int): Index of the event to plot.
+        fig_dir (Path): Path to save the figure.
+        h3dd_hout (Path, optional): Path to the h3dd hout. Defaults to None.
+        amplify_index (int, optional): Amplify index for sac data. Defaults to 5.
+        sac_parent_dir (Path, optional): Path to the sac data. Defaults to None.
+        sac_dir_name (Path, optional): Name of the sac data directory. Defaults to None.
+        h5_parent_dir (Path, optional): Path to the h5 data (DAS). Defaults to None.
+        parallel (bool, optional): Whether to use parallel processing. Defaults to False.
+    """
+    df_event, event_dict, df_event_picks = preprocess_gamma_csv(
+        gamma_catalog=gamma_events,
+        gamma_picks=gamma_picks,
+        event_i=event_i,
+        h3dd_hout=h3dd_hout,
+    )
+    if not parallel:
+        df_all_picks = preprocess_phasenet_csv(phasenet_picks=phasenet_picks)
+    else:
+        df_all_picks = df_all_picks
+    if h3dd_hout is not None:
+        status = 'h3dd'
+        use_h3dd = True
+    else:
+        status = 'gamma'
+        use_h3dd = False
+
+    # figure setting
+    fig = plt.figure()
+    map_proj = ccrs.PlateCarree()
+    # tick_proj = ccrs.PlateCarree()
+
+    # retrieving data
+    if sac_parent_dir is not None and sac_dir_name is not None:
+        sac_dict = find_sac_data(
+            event_time=event_dict[status]['event_time'],
+            date=event_dict['gamma']['date'],
+            event_point=event_dict[status]['event_point'],
+            station_list=station,
+            sac_parent_dir=sac_parent_dir,
+            sac_dir_name=sac_dir_name,
+            amplify_index=amplify_index,
+        )
+        seis_map_ax = fig.add_axes([0.3, 0.5, 0.4, 0.8], projection=map_proj)
+        seis_map_ax.set_title(
+            f"Event_{event_i}: {event_dict[status]['event_time']}\nlat: {event_dict[status]['event_lat']}, lon: {event_dict[status]['event_lon']}, depth: {event_dict[status]['event_depth']} km"
+        )
+        seis_waveform_ax = fig.add_axes([0.82, 0.5, 0.8, 0.9])
+    else:
+        seis_map_ax = None
+        seis_waveform_ax = None
+
+    if h5_parent_dir is not None:
+        das_map_ax = fig.add_axes([0.3, -0.15, 0.4, 0.55], projection=map_proj)
+        das_waveform_ax = fig.add_axes([0.82, -0.15, 0.8, 0.55])
+    else:
+        das_map_ax = None
+        das_waveform_ax = None
+    df_seis_phasenet_picks, df_das_phasenet_picks = find_phasenet_pick(
+        event_total_seconds=event_dict[status]['event_total_seconds'],
+        sac_dict=sac_dict,
+        df_all_picks=df_all_picks,
+    )
+    df_seis_gamma_picks, df_das_gamma_picks = find_gamma_pick(
+        df_gamma_picks=df_event_picks,
+        sac_dict=sac_dict,
+        event_total_seconds=event_dict[status]['event_total_seconds'],
+    )
+    plot_waveform_check(
+        sac_dict=sac_dict,
+        df_seis_phasenet_picks=return_none_if_empty(df_seis_phasenet_picks),
+        df_seis_gamma_picks=return_none_if_empty(df_seis_gamma_picks),
+        df_das_phasenet_picks=return_none_if_empty(df_das_phasenet_picks),
+        df_das_gamma_picks=return_none_if_empty(df_das_gamma_picks),
+        event_total_seconds=event_dict[status]['event_total_seconds'],
+        h5_parent_dir=h5_parent_dir,
+        das_ax=das_waveform_ax,
+        seis_ax=seis_waveform_ax,
+    )
+
+    plot_map(
+        station=station,
+        event_dict=event_dict,
+        df_event_picks=df_event_picks,
+        seis_ax=seis_map_ax,
+        das_ax=das_map_ax,
+        use_h3dd=use_h3dd,
+    )
+    save_name = (
+        event_dict[status]['event_time']
+        .replace(':', '_')
+        .replace('-', '_')
+        .replace('.', '_')
+    )
+    plt.tight_layout()
+    plt.savefig(
+        fig_dir / f'event_{event_i}_{save_name}.png', bbox_inches='tight', dpi=300
+    )
+    plt.close()
