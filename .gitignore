@@ -1,0 +1,11 @@
+/vel_model
+*__pycache__
+/test_format
+/test/seis
+/test/das
+*.png
+gmt.history
+
+# python file
+plot_design.py
+quick.py
