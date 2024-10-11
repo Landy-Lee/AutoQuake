@@ -117,15 +117,17 @@ def preprocess_gamma_csv(
     return df_event, event_dict, df_event_picks
 
 
-def preprocess_phasenet_csv(phasenet_picks: Path):
+def preprocess_phasenet_csv(
+    phasenet_picks: Path, get_station=lambda x: str(x).split('.')[1]
+):
     df_all_picks = pd.read_csv(phasenet_picks)
     df_all_picks['phase_time'] = pd.to_datetime(df_all_picks['phase_time'])
     df_all_picks['total_seconds'] = df_all_picks['phase_time'].apply(get_total_seconds)
-    df_all_picks['system'] = df_all_picks['station_id'].apply(
-        lambda x: str(x).split('.')[0]
-    )  # TW or MiDAS blablabla ***
+    # df_all_picks['system'] = df_all_picks['station_id'].apply(
+    #     lambda x: str(x).split('.')[0]
+    # )  # TW or MiDAS blablabla
     df_all_picks['station'] = df_all_picks['station_id'].apply(
-        lambda x: str(x).split('.')[1]
+        get_station
     )  # LONT (station name) or A001 (channel name)
     return df_all_picks
 
@@ -138,6 +140,7 @@ def find_das_data(
     train_window=0.64,
     visual_window=2,
     sampling_rate=100,
+    station_mask=station_mask,
 ):
     """
     temp function, disentangle is needed.
@@ -145,7 +148,7 @@ def find_das_data(
     df_pol = pd.read_csv(polarity_picks)
     df_pol.rename(columns={'station_id': 'station'}, inplace=True)
     df_pol_clean = df_pol[df_pol['event_index'] == event_index]
-    df_pol_clean = df_pol_clean[station_mask(df_pol_clean)]
+    df_pol_clean = df_pol_clean[df_pol_clean['station'].map(station_mask)]
     das_plot_dict = {}
     for _, row in df_pol_clean.iterrows():
         if row.polarity == 'U':
@@ -310,6 +313,7 @@ def find_phasenet_pick(
     dx=4.084,
     dt=0.01,
     hdf5_time=300,
+    station_mask=station_mask,
 ):
     """
     Filtering waveform in specific time window and convert it for scatter plot.
@@ -354,6 +358,7 @@ def find_gamma_pick(
     dx=4.084,
     dt=0.01,
     hdf5_time=300,
+    station_mask=station_mask,
 ):
     """
     Preparing the associated picks for scatter plot.
@@ -421,6 +426,7 @@ def plot_map(
     das_region=None,
     use_gamma=True,
     use_h3dd=False,
+    station_mask=station_mask,
 ):
     map_proj = ccrs.PlateCarree()
     # tick_proj = ccrs.PlateCarree()
@@ -553,7 +559,7 @@ def return_none_if_empty(df):
 
 
 def plot_asso(
-    phasenet_picks: Path,
+    df_phasenet_picks: pd.DataFrame,
     gamma_picks: Path,
     gamma_events: Path,
     station: Path,
@@ -564,25 +570,31 @@ def plot_asso(
     sac_parent_dir=None,
     sac_dir_name=None,
     h5_parent_dir=None,
-    parallel=False,
-    df_all_picks=None,
+    station_mask=station_mask,
+    seis_region=None,
+    das_region=None,
 ):
     """
-    Plotting the gamma and h3dd info.
+    ## Plotting the gamma and h3dd info.
 
     Args:
-        phasenet_picks (Path): Path to the phasenet picks.
-        gamma_picks (Path): Path to the gamma picks.
-        gamma_events (Path): Path to the gamma events.
-        station (Path): Path to the station info.
-        event_i (int): Index of the event to plot.
-        fig_dir (Path): Path to save the figure.
-        h3dd_hout (Path, optional): Path to the h3dd hout. Defaults to None.
-        amplify_index (int, optional): Amplify index for sac data. Defaults to 5.
-        sac_parent_dir (Path, optional): Path to the sac data. Defaults to None.
-        sac_dir_name (Path, optional): Name of the sac data directory. Defaults to None.
-        h5_parent_dir (Path, optional): Path to the h5 data (DAS). Defaults to None.
-        parallel (bool, optional): Whether to use parallel processing. Defaults to False.
+        - df_phasenet_picks (pd.DataFrame): phasenet picks.
+        - gamma_picks (Path): Path to the gamma picks.
+        - gamma_events (Path): Path to the gamma events.
+        - station (Path): Path to the station info.
+        - event_i (int): Index of the event to plot.
+        - fig_dir (Path): Path to save the figure.
+
+        - h3dd_hout (Path, optional): Path to the h3dd hout. Defaults to None.
+        - amplify_index (int, optional): Amplify index for sac data. Defaults to 5.
+        - sac_parent_dir (Path, optional): Path to the sac data. Defaults to None.
+        - sac_dir_name (Path, optional): Name of the sac data directory. Defaults to None.
+        - h5_parent_dir (Path, optional): Path to the h5 data (DAS). Defaults to None.
+        - station_mask (function, optional): Function to mask the station. Defaults to station_mask.
+        - seis_region (list, optional): Region for seismic plot. Defaults to None.
+            - 4-element list: [min_lon, max_lon, min_lat, max_lat]
+        - das_region (list, optional): Region for DAS plot. Defaults to None.
+            - 4-element list: [min_lon, max_lon, min_lat, max_lat]
     """
     df_event, event_dict, df_event_picks = preprocess_gamma_csv(
         gamma_catalog=gamma_events,
@@ -590,10 +602,7 @@ def plot_asso(
         event_i=event_i,
         h3dd_hout=h3dd_hout,
     )
-    if not parallel:
-        df_all_picks = preprocess_phasenet_csv(phasenet_picks=phasenet_picks)
-    else:
-        df_all_picks = df_all_picks
+
     if h3dd_hout is not None:
         status = 'h3dd'
         use_h3dd = True
@@ -625,6 +634,7 @@ def plot_asso(
     else:
         seis_map_ax = None
         seis_waveform_ax = None
+        sac_dict = {}
 
     if h5_parent_dir is not None:
         das_map_ax = fig.add_axes([0.3, -0.15, 0.4, 0.55], projection=map_proj)
@@ -635,12 +645,14 @@ def plot_asso(
     df_seis_phasenet_picks, df_das_phasenet_picks = find_phasenet_pick(
         event_total_seconds=event_dict[status]['event_total_seconds'],
         sac_dict=sac_dict,
-        df_all_picks=df_all_picks,
+        df_all_picks=df_phasenet_picks,
+        station_mask=station_mask,
     )
     df_seis_gamma_picks, df_das_gamma_picks = find_gamma_pick(
         df_gamma_picks=df_event_picks,
         sac_dict=sac_dict,
         event_total_seconds=event_dict[status]['event_total_seconds'],
+        station_mask=station_mask,
     )
     plot_waveform_check(
         sac_dict=sac_dict,
@@ -661,6 +673,9 @@ def plot_asso(
         seis_ax=seis_map_ax,
         das_ax=das_map_ax,
         use_h3dd=use_h3dd,
+        station_mask=station_mask,
+        seis_region=seis_region,
+        das_region=das_region,
     )
     save_name = (
         event_dict[status]['event_time']
@@ -668,6 +683,7 @@ def plot_asso(
         .replace('-', '_')
         .replace('.', '_')
     )
+
     plt.tight_layout()
     plt.savefig(
         fig_dir / f'event_{event_i}_{save_name}.png', bbox_inches='tight', dpi=300
