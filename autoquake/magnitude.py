@@ -8,6 +8,7 @@ from typing import Tuple
 import pandas as pd
 from obspy import UTCDateTime, read
 from obspy.io.sac.sacpz import attach_paz
+
 from .utils import degree_trans
 
 pre_filt = (0.1, 0.5, 30, 35)
@@ -116,7 +117,7 @@ class Magnitude:
             'longitude',
             'latitude',
             'depth',
-            'event_index',
+            'h3dd_event_index',
         ]
         mag_picks_header = [
             'station',
@@ -127,7 +128,7 @@ class Magnitude:
             'azimuth',
             'takeoff_angle',
             'elevation',
-            'event_index',
+            'h3dd_event_index',
         ]
         df_station = pd.read_csv(
             self.station_info,
@@ -172,14 +173,15 @@ class Magnitude:
                 )
             else:
                 station = line[1:5].strip()
-                dist = line[5:11]
+                dist = float(line[5:11].strip())
                 azi = int(line[12:15].strip())
                 toa = int(line[16:19].strip())
                 phase_min = int(line[20:23].strip())
                 p_weight = line[35:39].strip()
                 s_weight = line[51:55].strip()
                 elevation = (
-                    df_station[df_station['station'] == station].iloc[0].elevation / 1000
+                    df_station[df_station['station'] == station].iloc[0].elevation
+                    / 1000
                 )
 
                 if p_weight == '1.00':
@@ -254,7 +256,9 @@ class Magnitude:
         else:
             raise ValueError(f'seis_type is not correct: {comp}: {seis_type}')
 
-    def _calculate_time_window(self, df_sta_picks: pd.DataFrame) -> Tuple[UTCDateTime, UTCDateTime, UTCDateTime, UTCDateTime]:  # noqa: UP006
+    def _calculate_time_window(
+        self, df_sta_picks: pd.DataFrame
+    ) -> Tuple[UTCDateTime, UTCDateTime, UTCDateTime, UTCDateTime]:  # noqa: UP006
         """
         calcuate the time window for each station.
 
@@ -311,8 +315,20 @@ class Magnitude:
         tt1 = t1 - 100
         tt2 = t2 + 100
         return t1, t2, tt1, tt2
-    
-    def _find_max_amp(self, code: int, comp_list: list, station: str, t1: UTCDateTime, t2: UTCDateTime, tt1: UTCDateTime, tt2: UTCDateTime, mn=1000, pre_filt=pre_filt, wa_simulate=wa_simulate):
+
+    def _find_max_amp(
+        self,
+        code: int,
+        comp_list: list,
+        station: str,
+        t1: UTCDateTime,
+        t2: UTCDateTime,
+        tt1: UTCDateTime,
+        tt2: UTCDateTime,
+        mn=1000,
+        pre_filt=pre_filt,
+        wa_simulate=wa_simulate,
+    ):
         """
         Find maximum amplitude from different scenarios followed the
         CWA (1993).
@@ -331,27 +347,22 @@ class Magnitude:
             st = read(sac_path)
             attach_paz(tr=st[0], paz_file=str(pz_path))
             st.trim(starttime=tt1, endtime=tt2)  # cut longer for simulate
-            st.simulate(
-                paz_remove='self', paz_simulate=wa_simulate, pre_filt=pre_filt
-            )
+            st.simulate(paz_remove='self', paz_simulate=wa_simulate, pre_filt=pre_filt)
             if code == 2:
                 st.filter('bandpass', freqmin=1, freqmax=25)
             st.trim(starttime=t1, endtime=t2)
             response_dict[i] = max(max(st[0].data), abs(min(st[0].data)))
-        
+
         if comp[1] == 'L' or comp[1] == 'H':
-            response_dict = {
-                key: value * mn for key, value in response_dict.items()
-            }
+            response_dict = {key: value * mn for key, value in response_dict.items()}
 
         return response_dict
-    def _calulate_mag(self, response_dict: dict, dist: float, depth: float)-> float:
+
+    def _calulate_mag(self, response_dict: dict, dist: float, depth: float) -> float:
         """
         Using R (dist**2 + depth**2) to correct and estimate the magnitude.
         """
-        nloga = math.log10(
-            math.sqrt(response_dict[0] ** 2 + response_dict[1] ** 2)
-        )
+        nloga = math.log10(math.sqrt(response_dict[0] ** 2 + response_dict[1] ** 2))
 
         R = math.sqrt(dist**2 + depth**2)
         if depth <= 35:
@@ -363,25 +374,27 @@ class Magnitude:
             dA = -0.00326 * R - 0.83 * math.log10(R) - 1.01
 
         return nloga - dA
-    
-    def get_mag(
-        self, df_h3dd_events: pd.DataFrame, df_h3dd_picks: pd.DataFrame, lock, event_index: int
-    ):
+
+    def get_mag(self, event_index: int):
         """
         Calculate suitable time window for each station in N4 determination.
         """
-        df_event = df_h3dd_events[df_h3dd_events['event_index'] == event_index].copy()
+        df_event = self.df_h3dd_events[
+            self.df_h3dd_events['h3dd_event_index'] == event_index
+        ].copy()
         depth = float(df_event['depth'].iloc[0])
-        df_picks = df_h3dd_picks[(df_h3dd_picks['event_index'] == event_index)].copy()
+        df_picks = self.df_h3dd_picks[
+            (self.df_h3dd_picks['h3dd_event_index'] == event_index)
+        ].copy()
 
         station_num = 0
         sum_mag = 0
 
         for station in set(df_picks['station']):
             df_sta_picks = df_picks[df_picks['station'] == station].copy()
-            
+
             t1, t2, tt1, tt2 = self._calculate_time_window(df_sta_picks)
-            
+
             sac_path_list = list((self.sac_parent_dir / self.ymd).glob(f'*{station}*'))
             comp_list = [
                 sac_path.stem.split('.')[3]
@@ -392,60 +405,62 @@ class Magnitude:
                 code = self._kinethreshold(
                     comp_list=comp_list, station=station, t1=t1, t2=t2
                 )
-                
+
                 response_dict = self._find_max_amp(
-                    code=code, comp_list=comp_list, station=station,
-                    t1=t1, t2=t2, tt1=tt1, tt2=tt2
+                    code=code,
+                    comp_list=comp_list,
+                    station=station,
+                    t1=t1,
+                    t2=t2,
+                    tt1=tt1,
+                    tt2=tt2,
                 )
 
-                actual_depth = depth + df_sta_picks['elevation'].iloc[0] 
+                actual_depth = depth + df_sta_picks['elevation'].iloc[0]
                 if response_dict is not None:
                     sta_mag = self._calulate_mag(
                         response_dict=response_dict,
-                        dist = float(df_sta_picks['dist'].iloc[0]),
-                        depth=actual_depth
-                        )
-                    
+                        dist=float(df_sta_picks['dist'].iloc[0]),
+                        depth=actual_depth,
+                    )
+
                     station_num += 1
                     df_picks.loc[df_picks['station'] == station, 'magnitude'] = sta_mag
                     sum_mag += sta_mag
             else:
-                logging.info(f"We only have {len(comp_list)} horizontal components in {station}")
+                logging.info(
+                    f'We only have {len(comp_list)} horizontal components in {station}'
+                )
                 continue
         if station_num > 0:
             sum_mag /= station_num
             df_event['magnitude'] = sum_mag
-        
+
         return df_event, df_picks
-    
+
     def run_mag(self, output_dir: Path, processes=10):
         """
         Spawn processes to run `get_mag` for multiple event indices in parallel.
         """
         self.process_h3dd()
-        
-        event_indices = set(self.df_h3dd_events['event_index'])
-        manager = mp.Manager()
-        # shared_df_events = manager.dict()  # Store df_event for each event index.
-        # shared_df_picks = manager.dict()  # Store df_picks for each event index.
-        lock = manager.Lock()
+
+        event_indices = set(self.df_h3dd_events['h3dd_event_index'])
 
         with mp.Pool(processes=processes) as pool:
             results = pool.starmap(
-                self.get_mag,
-                [(self.df_h3dd_events, self.df_h3dd_picks, lock, event_index) 
-                for event_index in event_indices]
+                self.get_mag, [(event_index) for event_index in event_indices]
             )
-        
+
         # Collect all events and picks into lists
         all_events, all_picks = [], []
         for event, picks in results:
             if not event.empty:
                 all_events.append(event)
-                df_event_result = pd.concat(all_events, ignore_index=True)
-                df_event_result.to_csv(output_dir/"mag_events.csv", index=False)        
 
             if not picks.empty:
                 all_picks.append(picks)
-                df_picks_result = pd.concat(all_picks, ignore_index=True)
-                df_picks_result.to_csv(output_dir/"mag_picks.csv", index=False)
+
+        df_event_result = pd.concat(all_events, ignore_index=True)
+        df_event_result.to_csv(output_dir / 'mag_events.csv', index=False)
+        df_picks_result = pd.concat(all_picks, ignore_index=True)
+        df_picks_result.to_csv(output_dir / 'mag_picks.csv', index=False)
