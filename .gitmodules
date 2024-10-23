@@ -4,3 +4,6 @@
 [submodule "PhaseNet"]
 	path = PhaseNet
 	url = git@github.com:IES-ESLab/PhaseNet.git
+[submodule "autoquake/GaMMA"]
+	path = autoquake/GaMMA
+	url = git@github.com:IES-ESLab/GaMMA.git
