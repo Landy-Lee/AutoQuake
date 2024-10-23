@@ -2,7 +2,7 @@
 	path = EQNet
 	url = git@github.com:IES-ESLab/EQNet.git
 [submodule "GaMMA"]
-	path = GaMMA
+	path = autoquake/GaMMA
 	url = git@github.com:IES-ESLab/GaMMA.git
 [submodule "PhaseNet"]
 	path = PhaseNet
