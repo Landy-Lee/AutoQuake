@@ -2,7 +2,10 @@
 line-length = 88
 target-version = "py310"
 fix = true
-
+exclude = [
+    "**/*.ipynb",  # Ignore all Jupyter notebooks
+    "**/*.csv",     # Ignore all CSV files
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
