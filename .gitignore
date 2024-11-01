@@ -5,7 +5,22 @@
 /test/das
 *.png
 gmt.history
+*.log
+*.csv
+*.dout
+*.P24
+*.ps
+/model_phasenet
 
 # python file
 plot_design.py
 quick.py
+
+# H3DD
+/H3DD/*.dat_ch
+/H3DD/tomops_H14
+/H3DD/*.out
+
+/gamma_result
+
+/GAfocal/results.txt
