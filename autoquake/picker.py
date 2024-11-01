@@ -1,7 +1,9 @@
 import argparse
 import logging
+import multiprocessing
 import os
 from contextlib import nullcontext
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import matplotlib
@@ -30,54 +32,57 @@ from .EQNet.eqnet.utils import (
 matplotlib.use('agg')
 logger = logging.getLogger()
 
-result_path_ = str(Path(__file__).parents[1].resolve() / 'phasenet_result')
 
 class PhaseNet:
     def __init__(
-            self,
-            data_path: str, # ???
-            data_list: str | None = None,
-            result_path=result_path_,
-            hdf5_file: str | None = None,
-            prefix='',
-            format='h5', # TODO: what format scenarios is performed?
-            dataset='das',
-            model='phasenet_das',
-            resume='',
-            backbone='unet',
-            phases=['P', 'S'],
-            device='cuda',
-            workers=0,
-            batch_size=1,
-            use_deterministic_algorithms=True,
-            amp=True,
-            world_size=1,
-            dist_url='env://',
-            plot_figure=False,
-            min_prob=0.3,
-            add_polarity=False,
-            add_event=True,
-            sampling_rate=100.0,
-            highpass_filter: float | None = None,
-            response_path: str | None = None,
-            response_xml: str | None = None,
-            subdir_level=0,
-            cut_patch=False, # DAS
-            nt=1024 * 20, # TODO: modified as MiDAS default
-            nx=1024 * 5,
-            resample_time=False, # DAS
-            resample_space=False, # DAS
-            system: str | None = None, # DAS
-            location: str | None = None, # DAS
-            skip_existing=False # DAS
-            ):
+        self,
+        data_parent_dir: Path,
+        start_ymd: str,
+        end_ymd: str,
+        data_list: str | None = None,
+        result_path: Path | None = None,
+        hdf5_file: str | None = None,
+        prefix='',
+        format='h5',  # TODO: what format scenarios is performed?
+        dataset='das',
+        model='phasenet_das',
+        resume='',
+        backbone='unet',
+        phases=['P', 'S'],
+        device='cuda',
+        workers=0,
+        batch_size=1,
+        use_deterministic_algorithms=True,
+        amp=True,
+        world_size=1,
+        dist_url='env://',
+        plot_figure=False,
+        min_prob=0.3,
+        add_polarity=False,
+        add_event=True,
+        sampling_rate=100.0,
+        highpass_filter: float | None = None,
+        response_path: str | None = None,
+        response_xml: str | None = None,
+        subdir_level=0,
+        cut_patch=False,  # DAS
+        nt=1024 * 20,  # TODO: modified as MiDAS default
+        nx=1024 * 5,
+        resample_time=False,  # DAS
+        resample_space=False,  # DAS
+        system: str | None = None,  # DAS
+        location: str | None = None,  # DAS
+        skip_existing=False,  # DAS
+    ):
         """
         Initialize PhaseNet.
         """
-        self.data_path = data_path
+        self.data_parent_dir = data_parent_dir
+        self.start_ymd = start_ymd
+        self.end_ymd = end_ymd
         self.format = format
-        self.data_list = self._check_data_list(data_list)
-        self.result_path = result_path
+        self.data_list = data_list
+        self.result_path = self._check_result_dir(result_path)
         self.hdf5_file = hdf5_file
         self.prefix = prefix
         self.dataset = dataset
@@ -109,54 +114,79 @@ class PhaseNet:
         self.system = system
         self.location = location
         self.skip_existing = skip_existing
-        
+        self.picks = (
+            self.result_path / f'picks_{model}' / f'{start_ymd}_{end_ymd}' / 'picks.csv'
+        )
         # Initialize instance variables based on parsed self.args
         self.input_to_args()
+
+    def _check_result_dir(self, result_path) -> Path:
+        if result_path is None:
+            return Path(__file__).parents[1].resolve() / 'phasenet_result'
+        else:
+            return result_path
+
+    def date_range(self):
+        start_date = datetime.strptime(self.start_ymd, '%Y%m%d')
+        end_date = datetime.strptime(self.end_ymd, '%Y%m%d')
+        delta = end_date - start_date
+        date_list = []
+        for i in range(delta.days + 1):
+            date = start_date + timedelta(days=i)
+            date_list.append(date.strftime('%Y%m%d'))
+        return date_list
 
     def input_to_args(self):
         """
         Converting input arguments to argparse.Namespace.
         """
-        self.args = argparse.Namespace(
-            data_path = self.data_path,
-            data_list = self.data_list,
-            result_path = self.result_path,
-            hdf5_file = self.hdf5_file,
-            prefix = self.prefix,
-            format = self.format,
-            dataset = self.dataset,
-            model = self.model,
-            resume = self.resume,
-            backbone = self.backbone,
-            phases = self.phases,
-            device = self.device,
-            workers = self.workers,
-            batch_size = self.batch_size,
-            use_deterministic_algorithms = self.use_deterministic_algorithms,
-            amp = self.amp,
-            world_size = self.world_size,
-            dist_url = self.dist_url,
-            plot_figure = self.plot_figure,
-            min_prob = self.min_prob,
-            add_polarity = self.add_polarity,
-            add_event = self.add_event,
-            sampling_rate = self.sampling_rate,
-            highpass_filter = self.highpass_filter,
-            response_path = self.response_path,
-            response_xml = self.response_xml,
-            subdir_level = self.subdir_level,
-            cut_patch = self.cut_patch,
-            nt = self.nt,
-            nx = self.nx,
-            resample_time = self.resample_time,
-            resample_space = self.resample_space,
-            system = self.system,
-            location = self.location,
-            skip_existing = self.skip_existing
-        )
-    def _check_data_list(self, data_list):
+        self.args_list = []
+        self.date_list = self.date_range()
+        for date in self.date_list:
+            data_path = self.data_parent_dir / date
+            args = argparse.Namespace(
+                data_path=str(data_path),
+                data_list=self._check_data_list(self.data_list, data_path),
+                ymd=date,
+                result_path=str(self.result_path),
+                hdf5_file=self.hdf5_file,
+                prefix=self.prefix,
+                format=self.format,
+                dataset=self.dataset,
+                model=self.model,
+                resume=self.resume,
+                backbone=self.backbone,
+                phases=self.phases,
+                device=self.device,
+                workers=self.workers,
+                batch_size=self.batch_size,
+                use_deterministic_algorithms=self.use_deterministic_algorithms,
+                amp=self.amp,
+                world_size=self.world_size,
+                dist_url=self.dist_url,
+                plot_figure=self.plot_figure,
+                min_prob=self.min_prob,
+                add_polarity=self.add_polarity,
+                add_event=self.add_event,
+                sampling_rate=self.sampling_rate,
+                highpass_filter=self.highpass_filter,
+                response_path=self.response_path,
+                response_xml=self.response_xml,
+                subdir_level=self.subdir_level,
+                cut_patch=self.cut_patch,
+                nt=self.nt,
+                nx=self.nx,
+                resample_time=self.resample_time,
+                resample_space=self.resample_space,
+                system=self.system,
+                location=self.location,
+                skip_existing=self.skip_existing,
+            )
+            self.args_list.append(args)
+
+    def _check_data_list(self, data_list, data_path: Path):
         if data_list is None:
-            all_list = list(Path(self.data_path).glob(f'*{self.format}'))
+            all_list = list(data_path.glob(f'*{self.format}'))
             data_list = []
             for i in all_list:
                 fname = f"{str(i).split('.D.')[0][:-1]}*"
@@ -166,6 +196,27 @@ class PhaseNet:
             with open(data_list) as f:
                 data_list = f.read().splitlines()
         return data_list
+
+    def concat_picks(self):
+        concat_list = []
+        for date in self.date_list:
+            # TODO: What about DAS data?
+            picks_path = self.result_path / f'picks_{self.model}'
+            df = pd.read_csv(picks_path / f'{date}.csv')
+            concat_list.append(df)
+
+        result = pd.concat(concat_list)
+        date_dir = (
+            self.result_path
+            / f'picks_{self.model}'
+            / f'{self.date_list[0]}_{self.date_list[-1]}'
+        )
+        date_dir.mkdir(parents=True, exist_ok=True)
+        result.to_csv(
+            date_dir / 'picks.csv',
+            index=False,
+        )
+
     def postprocess(self, meta, output, polarity_scale=1, event_scale=16):
         nt, nx = meta['nt'], meta['nx']
         data = meta['data'][:, :, :nt, :nx]
@@ -187,12 +238,12 @@ class PhaseNet:
             ]
         return meta, output
 
-    def pred_phasenet(self, model, data_loader, pick_path, figure_path):
+    def pred_phasenet(self, args, model, data_loader, pick_path, figure_path):
         model.eval()
         ctx = (
             nullcontext()
-            if self.args.device == 'cpu'
-            else torch.amp.autocast(device_type=self.args.device, dtype=self.args.ptdtype)
+            if args.device == 'cpu'
+            else torch.amp.autocast(device_type=args.device, dtype=args.ptdtype)
         )
         with torch.inference_mode():
             for meta in tqdm(data_loader, desc='Predicting', total=len(data_loader)):
@@ -204,7 +255,7 @@ class PhaseNet:
                         output['phase'], dim=1
                     )  # [batch, nch, nt, nsta]
                     topk_phase_scores, topk_phase_inds = detect_peaks(
-                        phase_scores, vmin=self.args.min_prob, kernel=128
+                        phase_scores, vmin=args.min_prob, kernel=128
                     )
                     phase_picks_ = extract_picks(
                         topk_phase_inds,
@@ -216,15 +267,15 @@ class PhaseNet:
                         if 'begin_time_index' in meta
                         else None,
                         dt=meta['dt_s'] if 'dt_s' in meta else 0.01,
-                        vmin=self.args.min_prob,
-                        phases=self.args.phases,
+                        vmin=args.min_prob,
+                        phases=args.phases,
                         waveform=meta['data'],
                         window_amp=[10, 5],  # s
                     )
 
                 for i in range(len(meta['file_name'])):
                     tmp = meta['file_name'][i].split('/')
-                    parent_dir = '/'.join(tmp[-self.args.subdir_level - 1 : -1])
+                    parent_dir = '/'.join(tmp[-args.subdir_level - 1 : -1])
                     filename = (
                         tmp[-1].replace('*', '').replace('?', '').replace('.mseed', '')
                     )
@@ -245,7 +296,7 @@ class PhaseNet:
                         index=False,
                     )
 
-                if self.args.plot_figure:
+                if args.plot_figure:
                     # meta["waveform_raw"] = meta["waveform"].clone()
                     # meta["data"] = moving_normalize(meta["data"])
                     plot_phasenet(
@@ -257,7 +308,7 @@ class PhaseNet:
                     )
 
         ## merge picks
-        if self.args.distributed:
+        if args.distributed:
             torch.distributed.barrier()
             if utils.is_main_process():
                 merge_picks(pick_path)
@@ -266,13 +317,13 @@ class PhaseNet:
         return 0
 
     def pred_phasenet_plus(
-        self, model, data_loader, pick_path, event_path, figure_path
+        self, args, model, data_loader, pick_path, event_path, figure_path
     ):
         model.eval()
         ctx = (
             nullcontext()
-            if self.args.device in ['cpu', 'mps']
-            else torch.amp.autocast(device_type=self.args.device, dtype=self.args.ptdtype)
+            if args.device in ['cpu', 'mps']
+            else torch.amp.autocast(device_type=args.device, dtype=args.ptdtype)
         )
         with torch.inference_mode():
             for meta in tqdm(data_loader, desc='Predicting', total=len(data_loader)):
@@ -294,7 +345,10 @@ class PhaseNet:
                         # polarity_scores = torch.sigmoid(output["polarity"])
                         polarity_scores = torch.softmax(output['polarity'], dim=1)
                     topk_phase_scores, topk_phase_inds = detect_peaks(
-                        phase_scores, vmin=self.args.min_prob, kernel=128, dt=dt.min().item()
+                        phase_scores,
+                        vmin=args.min_prob,
+                        kernel=128,
+                        dt=dt.min().item(),
                     )
                     phase_picks = extract_picks(
                         topk_phase_inds,
@@ -306,8 +360,8 @@ class PhaseNet:
                         if 'begin_time_index' in meta
                         else None,
                         dt=dt,
-                        vmin=self.args.min_prob,
-                        phases=self.args.phases,
+                        vmin=args.min_prob,
+                        phases=args.phases,
                         polarity_score=polarity_scores,
                         waveform=meta['data'],
                         window_amp=[10, 5],  # s
@@ -318,7 +372,7 @@ class PhaseNet:
                     event_time = output['event_time']
                     topk_event_scores, topk_event_inds = detect_peaks(
                         event_center,
-                        vmin=self.args.min_prob,
+                        vmin=args.min_prob,
                         kernel=16,
                         dt=dt.min().item() * 16.0,
                     )
@@ -332,13 +386,13 @@ class PhaseNet:
                         if 'begin_time_index' in meta
                         else None,
                         dt=dt,
-                        vmin=self.args.min_prob,
+                        vmin=args.min_prob,
                         event_time=event_time,
                     )
 
                 for i in range(len(meta['file_name'])):
                     tmp = meta['file_name'][i].split('/')
-                    parent_dir = '/'.join(tmp[-self.args.subdir_level - 1 : -1])
+                    parent_dir = '/'.join(tmp[-args.subdir_level - 1 : -1])
                     filename = (
                         tmp[-1].replace('*', '').replace('?', '').replace('.mseed', '')
                     )
@@ -378,7 +432,7 @@ class PhaseNet:
                             index=False,
                         )
 
-                if self.args.plot_figure:
+                if args.plot_figure:
                     plot_phasenet_plus(
                         meta,
                         phase_scores.cpu().float(),
@@ -397,7 +451,7 @@ class PhaseNet:
                     )
 
         ## merge picks
-        if self.args.distributed:
+        if args.distributed:
             torch.distributed.barrier()
             if utils.is_main_process():
                 merge_picks(pick_path)
@@ -407,12 +461,12 @@ class PhaseNet:
             merge_events(event_path)
         return 0
 
-    def pred_phasenet_das(self, model, data_loader, pick_path, figure_path):
+    def pred_phasenet_das(self, args, model, data_loader, pick_path, figure_path):
         model.eval()
         ctx = (
             nullcontext()
-            if self.args.device == 'cpu'
-            else torch.amp.autocast(device_type=self.args.device, dtype=self.args.ptdtype)
+            if args.device == 'cpu'
+            else torch.amp.autocast(device_type=args.device, dtype=args.ptdtype)
         )
         with torch.inference_mode():
             # for meta in metric_logger.log_every(data_loader, 1, header):
@@ -423,7 +477,7 @@ class PhaseNet:
                 meta, output = self.postprocess(meta, output)
                 scores = torch.softmax(output['phase'], dim=1)  # [batch, nch, nt, nsta]
                 topk_scores, topk_inds = detect_peaks(
-                    scores, vmin=self.args.min_prob, kernel=21
+                    scores, vmin=args.min_prob, kernel=21
                 )
 
                 picks_ = extract_picks(
@@ -438,14 +492,14 @@ class PhaseNet:
                     if 'begin_channel_index' in meta
                     else None,
                     dt=meta['dt_s'] if 'dt_s' in meta else 0.01,
-                    vmin=self.args.min_prob,
-                    phases=self.args.phases,
+                    vmin=args.min_prob,
+                    phases=args.phases,
                 )
 
                 for i in range(len(meta['file_name'])):
                     tmp = meta['file_name'][i].split('/')
-                    parent_dir = '/'.join(tmp[-self.args.subdir_level - 1 : -1])
-                    filename = tmp[-1].replace('*', '').replace(f'.{self.args.format}', '')
+                    parent_dir = '/'.join(tmp[-args.subdir_level - 1 : -1])
+                    filename = tmp[-1].replace('*', '').replace(f'.{args.format}', '')
                     if not os.path.exists(os.path.join(pick_path, parent_dir)):
                         os.makedirs(os.path.join(pick_path, parent_dir), exist_ok=True)
 
@@ -475,12 +529,12 @@ class PhaseNet:
                         index=False,
                     )
 
-                if self.args.plot_figure:
+                if args.plot_figure:
                     plot_das(
                         meta['data'].cpu().float(),
                         scores.cpu().float(),
                         picks=picks_,
-                        phases=self.args.phases,
+                        phases=args.phases,
                         file_name=meta['file_name'],
                         begin_time_index=meta['begin_time_index']
                         if 'begin_time_index' in meta
@@ -493,30 +547,34 @@ class PhaseNet:
                         figure_dir=figure_path,
                     )
 
-        if self.args.distributed:
+        if args.distributed:
             torch.distributed.barrier()
-            if self.args.cut_patch and utils.is_main_process():
+            if args.cut_patch and utils.is_main_process():
                 merge_patch(
                     pick_path, pick_path.rstrip('_patch'), return_single_file=False
                 )
         else:
-            if self.args.cut_patch:
+            if args.cut_patch:
                 merge_patch(
                     pick_path, pick_path.rstrip('_patch'), return_single_file=False
                 )
 
         return 0
 
-    def predict(self):
-        result_path = self.args.result_path
-        if self.args.cut_patch:
-            pick_path = os.path.join(result_path, f'picks_{self.args.model}_patch')
-            event_path = os.path.join(result_path, f'events_{self.args.model}_patch')
-            figure_path = os.path.join(result_path, f'figures_{self.args.model}_patch')
+    def predict(self, args):
+        result_path = args.result_path
+        if args.cut_patch:
+            pick_path = os.path.join(result_path, f'picks_{args.model}_patch', args.ymd)
+            event_path = os.path.join(
+                result_path, f'events_{args.model}_patch', args.ymd
+            )
+            figure_path = os.path.join(
+                result_path, f'figures_{args.model}_patch', args.ymd
+            )
         else:
-            pick_path = os.path.join(result_path, f'picks_{self.args.model}')
-            event_path = os.path.join(result_path, f'events_{self.args.model}')
-            figure_path = os.path.join(result_path, f'figures_{self.args.model}')
+            pick_path = os.path.join(result_path, f'picks_{args.model}', args.ymd)
+            event_path = os.path.join(result_path, f'events_{args.model}', args.ymd)
+            figure_path = os.path.join(result_path, f'figures_{args.model}', args.ymd)
         if not os.path.exists(result_path):
             utils.mkdir(result_path)
         if not os.path.exists(pick_path):
@@ -526,10 +584,9 @@ class PhaseNet:
         if not os.path.exists(figure_path):
             utils.mkdir(figure_path)
 
-        utils.init_distributed_mode(self.args)
-        print(self.args)
+        utils.init_distributed_mode(args)
 
-        if self.args.distributed:
+        if args.distributed:
             rank = utils.get_rank()
             world_size = utils.get_world_size()
         else:
@@ -540,7 +597,7 @@ class PhaseNet:
                 rank = 0
                 world_size = 1
 
-        device = torch.device(self.args.device)
+        device = torch.device(args.device)
         dtype = (
             'bfloat16'
             if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -551,98 +608,96 @@ class PhaseNet:
             'bfloat16': torch.bfloat16,
             'float16': torch.float16,
         }[dtype]
-        self.args.dtype, self.args.ptdtype = dtype, ptdtype
+        args.dtype, args.ptdtype = dtype, ptdtype
         torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
-        if self.args.use_deterministic_algorithms:
+        if args.use_deterministic_algorithms:
             torch.backends.cudnn.benchmark = False
             torch.use_deterministic_algorithms(True)
         else:
             torch.backends.cudnn.benchmark = True
 
-        if self.args.model in ['phasenet', 'phasenet_plus']:
+        if args.model in ['phasenet', 'phasenet_plus']:
             dataset = SeismicTraceIterableDataset(
-                data_path=self.args.data_path,
-                data_list=self.args.data_list,
-                hdf5_file=self.args.hdf5_file,
-                prefix=self.args.prefix,
-                format=self.args.format,
-                dataset=self.args.dataset,
+                data_path=args.data_path,
+                data_list=args.data_list,
+                hdf5_file=args.hdf5_file,
+                prefix=args.prefix,
+                format=args.format,
+                dataset=args.dataset,
                 training=False,
-                sampling_rate=self.args.sampling_rate,
-                highpass_filter=self.args.highpass_filter,
-                response_path=self.args.response_path,
-                response_xml=self.args.response_xml,
-                cut_patch=self.args.cut_patch,
-                resample_time=self.args.resample_time,
-                system=self.args.system,
-                nx=self.args.nx,
-                nt=self.args.nt,
+                sampling_rate=args.sampling_rate,
+                highpass_filter=args.highpass_filter,
+                response_path=args.response_path,
+                response_xml=args.response_xml,
+                cut_patch=args.cut_patch,
+                resample_time=args.resample_time,
+                system=args.system,
+                nx=args.nx,
+                nt=args.nt,
                 rank=rank,
                 world_size=world_size,
             )
             sampler = None
-        elif self.args.model == 'phasenet_das':
+        elif args.model == 'phasenet_das':
             dataset = DASIterableDataset(
-                data_path=self.args.data_path,
-                data_list=self.args.data_list,
-                format=self.args.format,
-                nx=self.args.nx,
-                nt=self.args.nt,
+                data_path=args.data_path,
+                data_list=args.data_list,
+                format=args.format,
+                nx=args.nx,
+                nt=args.nt,
                 training=False,
-                system=self.args.system,
-                cut_patch=self.args.cut_patch,
-                highpass_filter=self.args.highpass_filter,
-                resample_time=self.args.resample_time,
-                resample_space=self.args.resample_space,
-                skip_existing=self.args.skip_existing,
+                system=args.system,
+                cut_patch=args.cut_patch,
+                highpass_filter=args.highpass_filter,
+                resample_time=args.resample_time,
+                resample_space=args.resample_space,
+                skip_existing=args.skip_existing,
                 pick_path=pick_path,
-                subdir_level=self.args.subdir_level,
+                subdir_level=args.subdir_level,
                 rank=rank,
                 world_size=world_size,
             )
             sampler = None
         else:
             raise ('Unknown model')  # type: ignore
-        print(f"dataset: {dataset}")
         data_loader = torch.utils.data.DataLoader(
             dataset,
-            batch_size=self.args.batch_size,
+            batch_size=args.batch_size,
             sampler=sampler,
-            num_workers=min(self.args.workers, mp.cpu_count()),
+            num_workers=min(args.workers, mp.cpu_count()),
             collate_fn=None,
             drop_last=False,
         )
-        print(f"data_loader: {data_loader}")
-        model = models.__dict__[self.args.model].build_model(
-            backbone=self.args.backbone,
+        model = models.__dict__[args.model].build_model(
+            backbone=args.backbone,
             in_channels=1,
-            out_channels=(len(self.args.phases) + 1),
+            out_channels=(len(args.phases) + 1),
         )
         logger.info(f'Model:\n{model}')
 
         model.to(device)
-        if self.args.distributed:
+        if args.distributed:
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
-        if self.args.resume:
-            checkpoint = torch.load(self.args.resume, map_location='cpu')
+        if args.resume:
+            checkpoint = torch.load(args.resume, map_location='cpu')
             # model.load_state_dict(checkpoint["model"], strict=True)
             # print("Loaded checkpoint '{}' (epoch {})".format(self.args.resume, checkpoint["epoch"]))
         else:
-            if self.args.model == 'phasenet':
-                if self.args.location is None:
+            if args.model == 'phasenet':
+                if args.location is None:
                     model_url = 'https://github.com/AI4EPS/models/releases/download/PhaseNet-v1/model_99.pth'
-            elif self.args.model == 'phasenet_plus':
-                if self.args.location is None:
+            elif args.model == 'phasenet_plus':
+                if args.location is None:
                     model_url = 'https://github.com/AI4EPS/models/releases/download/PhaseNet-Plus-v1/model_99.pth'
-                elif self.args.location == 'LCSN':
+                elif args.location == 'LCSN':
                     model_url = 'https://github.com/AI4EPS/models/releases/download/PhaseNet-Plus-LCSN/model_99.pth'
-            elif self.args.model == 'phasenet_das':
-                if self.args.location is None:
+            elif args.model == 'phasenet_das':
+                if args.location is None:
                     # model_url = "https://github.com/AI4EPS/models/releases/download/PhaseNet-DAS-v0/PhaseNet-DAS-v0.pth"
                     model_url = 'https://github.com/AI4EPS/models/releases/download/PhaseNet-DAS-v1/PhaseNet-DAS-v1.pth'
-                elif self.args.location == 'forge':
+                elif args.location == 'forge':
                     model_url = 'https://github.com/AI4EPS/models/releases/download/PhaseNet-DAS-ConvertedPhase/model_99.pth'
                 else:
                     raise ('Missing pretrained model for this location')  # type: ignore
@@ -650,7 +705,7 @@ class PhaseNet:
                 raise
             checkpoint = torch.hub.load_state_dict_from_url(
                 model_url,
-                model_dir=f'./model_{self.args.model}',
+                model_dir=f'./model_{args.model}',
                 progress=True,
                 check_hash=True,
                 map_location='cpu',
@@ -665,21 +720,27 @@ class PhaseNet:
             #     model.load_state_dict(checkpoint["model"], strict=True)
 
         model_without_ddp = model
-        if self.args.distributed:
+        if args.distributed:
             torch.distributed.barrier()
             model = torch.nn.parallel.DistributedDataParallel(
-                model, device_ids=[self.args.gpu]
+                model, device_ids=[args.gpu]
             )
             model_without_ddp = model.module
         model_without_ddp.load_state_dict(checkpoint['model'], strict=True)
 
-        if self.args.model == 'phasenet':
-            self.pred_phasenet(model, data_loader, pick_path, figure_path)
+        if args.model == 'phasenet':
+            self.pred_phasenet(args, model, data_loader, pick_path, figure_path)
 
-        if self.args.model == 'phasenet_plus':
+        if args.model == 'phasenet_plus':
             self.pred_phasenet_plus(
-                model, data_loader, pick_path, event_path, figure_path
+                args, model, data_loader, pick_path, event_path, figure_path
             )
 
-        if self.args.model == 'phasenet_das':
-            self.pred_phasenet_das(model, data_loader, pick_path, figure_path)
+        if args.model == 'phasenet_das':
+            self.pred_phasenet_das(args, model, data_loader, pick_path, figure_path)
+        # return os.path.join(pick_path, 'picks.csv')
+
+    def run_predict(self, processes=3):
+        with multiprocessing.Pool(processes=processes) as pool:
+            pool.map(self.predict, self.args_list)
+        self.concat_picks()

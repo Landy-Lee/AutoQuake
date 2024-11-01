@@ -11,18 +11,13 @@ import h5py
 import numpy as np
 import onnxruntime as ort
 import pandas as pd
-from obspy import UTCDateTime, read
+from obspy import Stream, UTCDateTime, read
 
 diting_model = (
     Path(__file__).parents[1].resolve() / 'focal_model' / 'DiTingMotionJul.onnx'
 )
 
 warnings.filterwarnings('ignore')
-os.environ['OMP_NUM_THREADS'] = '2'  # Adjust based on your system
-os.environ['MKL_NUM_THREADS'] = '2'
-session_options = ort.SessionOptions()
-session_options.intra_op_num_threads = 2
-session_options.inter_op_num_threads = 1
 
 
 def formatting(num):
@@ -71,7 +66,7 @@ class DitingMotion:
         self,
         gamma_picks: Path,
         model_path=diting_model,
-        output_dir=None,
+        output_dir: Path | None = None,
         sac_parent_dir=None,
         h5_parent_dir=None,
         interval=300,
@@ -79,16 +74,46 @@ class DitingMotion:
     ):
         self.gamma_picks = gamma_picks
         self.model_path = model_path
-        self.output_dir = output_dir
+        self.output_dir = self._check_output(output_dir)
         self.sac_parent_dir = sac_parent_dir
         self.h5_parent_dir = h5_parent_dir
         self.interval = interval
         self.sampling_rate = sampling_rate
         self.indices = self._get_indices()
+        self._set_thread_options()
+        self.picks = self.output_dir / 'polarity_picks.csv'
+
+    def _check_output(self, output):
+        if output is not None:
+            return output
+        else:
+            output = Path(__file__).parents[1].resolve() / 'diting_result'
+            output.mkdir(parents=True, exist_ok=True)
+            return output
+
+    def _set_thread_options(self):
+        os.environ['OMP_NUM_THREADS'] = '1'  # Adjust based on your system
+        os.environ['MKL_NUM_THREADS'] = '1'
 
     def _get_indices(self):
         df = pd.read_csv(self.gamma_picks)
         return [x for x in set(df['event_index']) if x != -1]
+
+    def _merge_latest(self, data_path: Path, sta_name: str):
+        """
+        Merge the latest data from the given data path for the specified station name.
+        """
+        sac_list = list(data_path.glob(f'*{sta_name}*Z*'))
+        if not sac_list:
+            logging.info(f'{sta_name} using other component')
+            sac_list = list(data_path.glob(f'*{sta_name}*'))
+            logging.info(f'comp_list: {sac_list}')
+        stream = Stream()
+        for sac_file in sac_list:
+            st = read(sac_file)
+            stream += st
+        stream = stream.merge(fill_value='latest')
+        return stream
 
     def seis_get_data(self, sta_name: str, p_arrival_: str, time_window=0.64):
         ymd = time_formatting(p_arrival_)
@@ -97,13 +122,15 @@ class DitingMotion:
             data_path = self.sac_parent_dir / ymd  # data
         else:
             raise ValueError('Please provide sac_parent_dir')
+
         try:
-            sac_file = list(data_path.glob(f'*{sta_name}*Z*'))[0]
+            st = self._merge_latest(data_path, sta_name)
         except Exception as e:
-            logging.info(f'Error: {sta_name}_{e} when p_arrival: {p_arrival}')
+            logging.info(
+                f'Error during merging: {sta_name}_{e} when p_arrival: {p_arrival}'
+            )
             return []
         try:
-            st = read(sac_file)
             st.detrend('demean')
             st.detrend('linear')
             st.taper(0.001)
@@ -114,7 +141,9 @@ class DitingMotion:
             data = st[0].data[0:128]
             return data
         except Exception as e:
-            logging.info(f'Error exist during process {sac_file}: {e}')
+            logging.info(
+                f'Error exist during process {sta_name}: {e}\np_arrival: {p_arrival}, data: {st[0].data}'
+            )
             return []
 
     # for DAS
@@ -219,7 +248,11 @@ class DitingMotion:
                         sharpness = 'E'
                     else:
                         sharpness = 'x'
-        return polarity
+                return polarity
+            else:
+                return 'x'
+        else:
+            return 'x'
 
     def process_row(self, row, motion_model) -> pd.DataFrame:
         if row.station_id[1].isdigit():
@@ -231,8 +264,6 @@ class DitingMotion:
             data = self.seis_get_data(
                 sta_name=row.station_id, p_arrival_=row.phase_time
             )
-        if data == []:
-            logging.info(f'empty data exist in {row.station_id}')
 
         polarity = self.diting_motion(data, row, motion_model)
         row['polarity'] = polarity
@@ -248,7 +279,10 @@ class DitingMotion:
             (df_picks['event_index'] == event_index) & (df_picks['phase_type'] == 'P')
         ]
         # Iterate through the selected picks
-        logging.info(f'event index: {event_index} start processing')
+        # logging.info(f'event index: {event_index} start processing')
+        session_options = ort.SessionOptions()
+        session_options.intra_op_num_threads = 1
+        session_options.inter_op_num_threads = 1
         ort_session = ort.InferenceSession(
             self.model_path, sess_options=session_options
         )
@@ -257,25 +291,23 @@ class DitingMotion:
             df_row = self.process_row(row=row, motion_model=ort_session)
             if not df_row.empty:
                 processed_rows.append(df_row)
-        logging.info(f'event index: {event_index} processing over')
+        # logging.info(f'event index: {event_index} processing over')
         return processed_rows
 
-    def run_parallel_predict(self, processes=10):
-        if self.output_dir is None:
-            self.output_dir = Path(__file__).parents[1].resolve() / 'diting_result'
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-        output_csv = self.output_dir / 'gamma_events_polarity.csv'
+    def run_parallel_predict(self, processes=3):
+        output_csv = self.output_dir / 'polarity_picks.csv'
         # if output_csv.exists():
         #     print(f'remove {output_csv}')
         #     output_csv.unlink()
         #     logging.info('remove the current csv file already!')
 
         # Use a process pool to parallelize the work
+        logging.info('Diting motion start.')
         with mp.Pool(processes=processes) as pool:
             results = pool.starmap(
                 self.predict, [(event_index,) for event_index in self.indices]
             )
-
+        logging.info('Diting motion over.')
         all_picks = [item for sublist in results for item in sublist]
         if all_picks:
             df__result = pd.DataFrame(all_picks)

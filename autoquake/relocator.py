@@ -1,4 +1,3 @@
-import logging
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -89,6 +88,8 @@ class H3DD:
         self.constrain_factor = constrain_factor
         self.joint_inv_with_single_event_method = joint_inv_with_single_event_method
         self.consider_elevation = consider_elevation
+        self.reorder_event = self.gamma_event.parent / 'gamma_reorder_event.csv'
+        self.dout = self.h3dd_dir / f'{event_name}.dat_ch.dout'
 
     def _station_h3dd_format(self, station: Path):
         """
@@ -197,7 +198,7 @@ class H3DD:
         with open(output_file, 'w') as r:
             for i in event_indices:
                 row = df_event[df_event['event_index'] == i]
-                logging.info(f'***Event {i}***')
+                # logging.info(f'***Event {i}***')
                 r.write(
                     f"{row['ymd'].iloc[0]:>9}{row['hour'].iloc[0]:>2}{row['minute'].iloc[0]:>2}{row['seconds'].iloc[0]:>6.2f}{row['lat_int'].iloc[0]:2}{row['lat_deg'].iloc[0]:0>5.2f}{row['lon_int'].iloc[0]:3}{row['lon_deg'].iloc[0]:0>5.2f}{row['depth'].iloc[0]:>6.2f}\n"
                 )
@@ -268,7 +269,7 @@ class H3DD:
         if len(df_event) > 4000:
             self.process_in_parallel(df_event, df_picks, chunk_size)
         else:
-            output_file = self.h3dd_dir / f'{self.event_name}_0.dat_ch'
+            output_file = self.h3dd_dir / f'{self.event_name}.dat_ch'
             df_event, df_picks = self._gamma_preprocess(
                 df_event=df_event, df_picks=df_picks
             )
@@ -282,9 +283,30 @@ class H3DD:
         Running 3D HypoDD.
         """
         self.gamma2h3dd()
-        for i in range(self.file_num):
-            self.config_h3dd_inp(dat_ch=self.h3dd_dir / f'{self.event_name}_{i}.dat_ch')
+        if self.file_num > 1:
+            for i in range(self.file_num):
+                self.config_h3dd_inp(
+                    dat_ch=self.h3dd_dir / f'{self.event_name}_{i}.dat_ch'
+                )
 
+                working_dir = self.h3dd_dir
+                # Open the input file safely using a context manager
+                with open(working_dir / 'h3dd.inp') as inp_file:
+                    # Run the executable with input from the file
+                    result = subprocess.run(
+                        ['./h3dd'],
+                        stdin=inp_file,  # Redirect input from the file
+                        text=True,
+                        cwd=working_dir,
+                    )
+
+                if result.returncode != 0:
+                    print('Error occurred during h3dd execution.')
+
+            # concat if file_num > 1
+            self.post_h3dd()
+        else:
+            self.config_h3dd_inp(dat_ch=self.h3dd_dir / f'{self.event_name}.dat_ch')
             working_dir = self.h3dd_dir
             # Open the input file safely using a context manager
             with open(working_dir / 'h3dd.inp') as inp_file:
@@ -321,14 +343,15 @@ class H3DD:
         """
         concat the dout and hout once the file_num > 1.
         """
-        for ftype in ['hout', 'dout']:
-            output_file = self.h3dd_dir / f'{self.event_name}.{ftype}'
-            with open(output_file, 'w') as outfile:
-                for i in range(self.file_num):
-                    fname = self.h3dd_dir / f'{self.event_name}_{i}.{ftype}'
-                    with open(fname) as infile:
-                        # NOTE: Using shutil.copyfileobj() for large file.
-                        outfile.write(infile.read())
+        if self.file_num > 1:
+            for ftype in ['hout', 'dout']:
+                output_file = self.h3dd_dir / f'{self.event_name}.{ftype}'
+                with open(output_file, 'w') as outfile:
+                    for i in range(self.file_num):
+                        fname = self.h3dd_dir / f'{self.event_name}_{i}.{ftype}'
+                        with open(fname) as infile:
+                            # NOTE: Using shutil.copyfileobj() for large file.
+                            outfile.write(infile.read())
 
     @staticmethod
     def pol_mag_to_dout(
@@ -337,7 +360,7 @@ class H3DD:
         polarity_picks: Path,
         magnitude_events: Path,
         magnitude_picks: Path,
-        output_dout: Path,
+        output_path: Path,
     ):
         """
         Combining polarity and magnitude information into dout.
@@ -347,6 +370,7 @@ class H3DD:
         df_pol = pd.read_csv(polarity_picks)
         df_mag_event = pd.read_csv(magnitude_events)
         df_mag_pick = pd.read_csv(magnitude_picks)
+        output_dout = output_path / f'{ori_dout.name}'
         with open(output_dout, 'w') as fo:
             with open(ori_dout) as r:
                 lines = r.readlines()
@@ -367,7 +391,7 @@ class H3DD:
                     sta_mag = round(
                         df_mag_pick[
                             (df_mag_pick['h3dd_event_index'] == h3dd_event_index)
-                            & (df_mag_pick['station_id'] == station)
+                            & (df_mag_pick['station'] == station)
                         ]['magnitude'].iloc[0],
                         2,
                     )
@@ -386,8 +410,50 @@ class H3DD:
                         polarity = ' '
 
                     fo.write(
-                        f'{line[:19]}{polarity} {line[21:].strip()} 0.00 0.00 0.00 {sta_mag} 0   0.0\n'
+                        f'{line[:19]}{polarity} {line[21:].strip()} 0.00 0.00 0.00 {sta_mag:4.2f} 0   0.0\n'
+                    )
+        return ori_dout.name
+
+    @staticmethod
+    def pol_to_dout(
+        ori_dout: Path,
+        gamma_reorder_event: Path,
+        polarity_picks: Path,
+        output_path: Path,
+    ):
+        """
+        Combining polarity and magnitude information into dout.
+        """
+        df_table = get_index_table(gamma_reorder_event=gamma_reorder_event)
+
+        df_pol = pd.read_csv(polarity_picks)
+        output_dout = output_path / f'{ori_dout.name}'
+        with open(output_dout, 'w') as fo:
+            with open(ori_dout) as r:
+                lines = r.readlines()
+            h3dd_event_index = 0
+            for line in lines:
+                if line.strip().split()[-1] == '3DD':
+                    h3dd_event_index += 1
+                    fo.write(line)
+                elif line[35:39] == '1.00':
+                    station = line[:5].strip()
+                    polarity = df_pol[
+                        (
+                            df_pol['event_index']
+                            == index_h3dd2gamma(df_table, h3dd_event_index)
+                        )
+                        & (df_pol['station_id'] == station)
+                    ]['polarity'].iloc[0]
+                    if polarity == 'U':
+                        polarity = '+'
+                    elif polarity == 'D':
+                        polarity = '-'
+                    else:
+                        polarity = ' '
+
+                    fo.write(
+                        f'{line[:19]}{polarity} {line[21:].strip()} 0.00 0.00 0.00 0.00 0   0.0\n'
                     )
 
-
-# %%
+        return ori_dout.name

@@ -2,11 +2,13 @@ import calendar
 import logging
 import math
 import multiprocessing as mp
+from datetime import datetime
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple  # noqa: UP035
 
+import numpy as np
 import pandas as pd
-from obspy import UTCDateTime, read
+from obspy import Stream, UTCDateTime, read
 from obspy.io.sac.sacpz import attach_paz
 
 from .utils import degree_trans
@@ -76,6 +78,19 @@ def get_phase_utc(year, month, day, hour, min, sec, phase_min, phase_sec):
         return check_time(year, month, day, hour, phase_min, phase_sec)
 
 
+def utc_get_ymd(time_string: str) -> str:
+    """
+    Converting utc time string into YMD format.
+    """
+    try:
+        datetime_obj = datetime.strptime(time_string, '%Y-%m-%dT%H:%M:%S.%f')
+    except Exception as e:
+        datetime_obj = datetime.strptime(time_string, '%Y-%m-%dT%H:%M:%S')
+        logging.info(f'{e}, so we use %Y-%m-%dT%H:%M:%S')
+    ymd = datetime_obj.strftime('%Y%m%d')
+    return ymd
+
+
 class Magnitude:
     """
     This class is to estimate the magnitude thorugh h3dd format.
@@ -83,7 +98,7 @@ class Magnitude:
     example:
     mag = Magnitude(
         dout_file=Path('/home/patrick/Work/AutoQuake/test_format/test.dout'),
-        station_info=Path('/home/patrick/Work/EQNet/tests/hualien_0403/station_seis.csv'),
+        station=Path('/home/patrick/Work/EQNet/tests/hualien_0403/station_seis.csv'),
         pz_path=Path('/data/share/for_patrick/PZ_test'),
         sac_parent_dir=Path('/data2/patrick/Hualien0403/Dataset/20240401/')
     )
@@ -92,14 +107,84 @@ class Magnitude:
     def __init__(
         self,
         dout_file: Path,
-        station_info: Path,
+        station: Path,
         sac_parent_dir: Path,
-        pz_path: Path,
+        pz_dir: Path,
+        output_dir: Path | None = None,
     ):
         self.dout_file = dout_file
-        self.station_info = station_info
+        self.station_info = station
         self.sac_parent_dir = sac_parent_dir
-        self.pz_path = pz_path
+        self.pz_path = pz_dir
+        self.output_dir = self._check_output(output_dir)
+        self.events = self.output_dir / 'mag_events.csv'
+        self.picks = self.output_dir / 'mag_picks.csv'
+
+    def _check_output(self, output):
+        if output is not None:
+            return output
+        else:
+            output = Path(__file__).parents[1].resolve() / 'mag_output'
+            output.mkdir(parents=True, exist_ok=True)
+            return output
+
+    def _merge_latest(
+        self,
+        sta_name: str,
+        comp: str,
+        t1: UTCDateTime,
+        t2: UTCDateTime,
+        tt1: UTCDateTime | None = None,
+        tt2: UTCDateTime | None = None,
+    ):
+        """
+        Merge the latest data from the given data path for the specified station name.
+        """
+        if tt1 is not None and tt2 is not None:
+            ymd_list = set()
+            for time in [t1, t2, tt1, tt2]:
+                ymd = utc_get_ymd(time.isoformat())
+                ymd_list.add(ymd)
+        else:
+            ymd_list = set()
+            for time in [t1, t2]:
+                ymd = utc_get_ymd(time.isoformat())
+                ymd_list.add(ymd)
+
+        stream = Stream()
+        for ymd in ymd_list:
+            sac_list = list((self.sac_parent_dir / ymd).glob(f'*{sta_name}*{comp}*'))
+            if not sac_list:
+                continue
+            for sac_file in sac_list:
+                st = read(sac_file)
+                stream += st
+        stream = stream.merge(fill_value='latest')
+        return stream
+
+    def _check_ymd_comp(self, df: pd.DataFrame, station: str) -> tuple[str, set[str]]:
+        time_string = df['phase_time'].iloc[0]
+        ymd = utc_get_ymd(time_string)
+        sac_path_list = list((self.sac_parent_dir / ymd).glob(f'*{station}*'))
+        comp_list = [
+            sac_path.stem.split('.')[3]
+            for sac_path in sac_path_list
+            if sac_path.stem.split('.')[3][-1] != 'Z'
+        ]
+        comp_list = set(comp_list)
+        if len(comp_list) <= 2:
+            return ymd, comp_list
+        elif len(comp_list) > 2:
+            priority_ends = ['N', 'E']
+            secondary_ends = ['1', '2']
+            prioriry_elements = {i for i in comp_list if i[-1] in priority_ends}
+            secondary_elements = {i for i in comp_list if i[-1] in secondary_ends}
+            if len(prioriry_elements) == 2:
+                return ymd, prioriry_elements
+            elif len(secondary_elements) == 2:
+                return ymd, secondary_elements
+            else:
+                return ymd, prioriry_elements
 
     def process_h3dd(self):
         """
@@ -208,23 +293,21 @@ class Magnitude:
                         event_index,
                     ]
                 )
-        self.ymd = f'{year:4}{month:02}{day:02}'
         # Write it into dataframe
         self.df_h3dd_events = pd.DataFrame(mag_event_list, columns=mag_event_header)
         self.df_h3dd_picks = pd.DataFrame(mag_picks_list, columns=mag_picks_header)
 
     def _kinethreshold(
-        self, comp_list: list, station: str, t1: UTCDateTime, t2: UTCDateTime
+        self, comp_list: set[str], station: str, t1: UTCDateTime, t2: UTCDateTime
     ):
         raw_list = []
         detrend_list = []
         for comp in comp_list:
-            sac_path = list(
-                (self.sac_parent_dir / self.ymd).glob(f'*{station}*{comp}*')
-            )[0]
+            st = self._merge_latest(station, comp, t1, t2)
             # 1. get the maxcN and mincN
-            st = read(sac_path)
+
             st.trim(starttime=t1, endtime=t2)
+
             raw_list.extend([max(st[0].data), abs(min(st[0].data))])
 
             # 2. get the maxnN and minnN
@@ -236,11 +319,17 @@ class Magnitude:
         max_detrend_amp = max(detrend_list)
         if seis_type == 'L':
             if max_amp <= 0.1:
+                logging.info(
+                    f'Code 0: Amplitude of {station} with seis type {seis_type} <= 0.1: {max_amp}'
+                )
                 return 0
             else:
                 return 1
         elif seis_type == 'S':
             if max_amp > 1:
+                logging.info(
+                    f'Code 0: Amplitude of {station} with seis type {seis_type} > 1: {max_amp}'
+                )
                 return 0
             elif max_amp < 0.0003:
                 return 2
@@ -248,13 +337,18 @@ class Magnitude:
                 return 1
         elif seis_type == 'H':
             if max_detrend_amp >= 5000000:
+                logging.info(
+                    f'Code 0: Amplitude of {station} with seis type {seis_type} >=5000000: {max_amp}'
+                )
                 return 0
             elif max_amp < 0.005:
                 return 2
             else:
                 return 1
         else:
-            raise ValueError(f'seis_type is not correct: {comp}: {seis_type}')
+            logging.info(f'{station} seis_type is not correct: {comp}: {seis_type}')
+            return 0
+            # raise ValueError(f'{station} seis_type is not correct: {comp}: {seis_type}')
 
     def _calculate_time_window(
         self, df_sta_picks: pd.DataFrame
@@ -319,7 +413,7 @@ class Magnitude:
     def _find_max_amp(
         self,
         code: int,
-        comp_list: list,
+        comp_list: set[str],
         station: str,
         t1: UTCDateTime,
         t2: UTCDateTime,
@@ -333,18 +427,15 @@ class Magnitude:
         Find maximum amplitude from different scenarios followed the
         CWA (1993).
         """
-        if code == 0:
-            logging.info(f'{station}: code == 0')
-            return
 
         # for code == 1 & code == 2
         response_dict = {}
         for i, comp in enumerate(comp_list):
-            sac_path = list(
-                (self.sac_parent_dir / self.ymd).glob(f'*{station}*{comp}*')
-            )[0]
+            try:
+                st = self._merge_latest(station, comp, t1, t2, tt1=tt1, tt2=tt2)
+            except Exception as e:
+                logging.info(f'Error exist during process {station}: {e}')
             pz_path = list(self.pz_path.glob(f'*{station}*{comp}*'))[0]
-            st = read(sac_path)
             attach_paz(tr=st[0], paz_file=str(pz_path))
             st.trim(starttime=tt1, endtime=tt2)  # cut longer for simulate
             st.simulate(paz_remove='self', paz_simulate=wa_simulate, pre_filt=pre_filt)
@@ -389,23 +480,22 @@ class Magnitude:
 
         station_num = 0
         sum_mag = 0
-
+        code_error_set = set()
+        hor_comp_error_dict = {}
         for station in set(df_picks['station']):
             df_sta_picks = df_picks[df_picks['station'] == station].copy()
 
             t1, t2, tt1, tt2 = self._calculate_time_window(df_sta_picks)
-
-            sac_path_list = list((self.sac_parent_dir / self.ymd).glob(f'*{station}*'))
-            comp_list = [
-                sac_path.stem.split('.')[3]
-                for sac_path in sac_path_list
-                if sac_path.stem.split('.')[3][-1] != 'Z'
-            ]
+            # TODO: check that all time is in the same day.
+            ymd, comp_list = self._check_ymd_comp(df=df_sta_picks, station=station)
+            # TODO: Set a scenario is that having (E, N), (1, 2) is fine, current scenario will pass the serie like {E, N ,1, 2}
             if len(comp_list) == 2:  # ensuring we have 2 horizontal component.
                 code = self._kinethreshold(
                     comp_list=comp_list, station=station, t1=t1, t2=t2
                 )
-
+                if code == 0:
+                    code_error_set.add(station)
+                    continue
                 response_dict = self._find_max_amp(
                     code=code,
                     comp_list=comp_list,
@@ -428,17 +518,18 @@ class Magnitude:
                     df_picks.loc[df_picks['station'] == station, 'magnitude'] = sta_mag
                     sum_mag += sta_mag
             else:
-                logging.info(
-                    f'We only have {len(comp_list)} horizontal components in {station}'
-                )
+                hor_comp_error_dict[station] = comp_list
                 continue
+        logging.info(f'code == 0 stations: {code_error_set}')
+        logging.info(f'horizontal elements not enough stations: {hor_comp_error_dict}')
         if station_num > 0:
             sum_mag /= station_num
             df_event['magnitude'] = sum_mag
-
+        else:
+            df_event['magnitude'] = np.nan
         return df_event, df_picks
 
-    def run_mag(self, output_dir: Path, processes=10):
+    def run_mag(self, processes=10):
         """
         Spawn processes to run `get_mag` for multiple event indices in parallel.
         """
@@ -448,7 +539,7 @@ class Magnitude:
 
         with mp.Pool(processes=processes) as pool:
             results = pool.starmap(
-                self.get_mag, [(event_index) for event_index in event_indices]
+                self.get_mag, [(event_index,) for event_index in event_indices]
             )
 
         # Collect all events and picks into lists
@@ -456,11 +547,10 @@ class Magnitude:
         for event, picks in results:
             if not event.empty:
                 all_events.append(event)
-
             if not picks.empty:
                 all_picks.append(picks)
 
         df_event_result = pd.concat(all_events, ignore_index=True)
-        df_event_result.to_csv(output_dir / 'mag_events.csv', index=False)
+        df_event_result.to_csv(self.output_dir / 'mag_events.csv', index=False)
         df_picks_result = pd.concat(all_picks, ignore_index=True)
-        df_picks_result.to_csv(output_dir / 'mag_picks.csv', index=False)
+        df_picks_result.to_csv(self.output_dir / 'mag_picks.csv', index=False)
