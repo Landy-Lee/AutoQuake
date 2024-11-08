@@ -7,13 +7,12 @@
 ## Table of Contents
 - [Getting Started](#getting-started)
 - [Installation](#installation)
+- [Dataset Structure (both hdf5 for DAS and SAC for Seismometer)](#dataset-structure-both-hdf5-for-das-and-sac-for-seismometer)
 - [Usage](#usage)
-- [Features](#features)
-- [Configuration](#configuration)
 - [Contributing](#contributing)
-- [Testing](#testing)
 - [Roadmap](#roadmap)
 - [License](#license)
+- [Submodules and External Dependencies](#submodules-and-external-dependencies)
 - [References](#references)
 - [Contact](#contact)
 
@@ -64,33 +63,28 @@ If you’re interested in contributing to the development of this project, follo
 7. **Open a Pull Request**: Once your changes are pushed, go to the original repository on GitHub and open a Pull Request from your branch to the dev branch of the main repository.
 Read to our [Contributing](#contributing) section for more details on how to contribute to this project.
 
-### Installation
+## Installation
 This package supports both `requirements.txt` and `env.yml` for dependency management. Choose one of the following installation methods:    
 
-#### 1. Using Conda (`env.yml`)
+### 1. Using Conda (`env.yml`)
 If you’re using Conda, create a new environment directly from the provided `env.yml` file:
    ```bash
    conda env create -f env.yml
    conda activate AutoQuake_v0
    ```
    
-#### 2. Using pip (`requirements.txt`)
+### 2. Using pip (`requirements.txt`)
 To install dependencies using `pip`:
    ```bash
    pip install -r requirements.txt
    ```
 
-#### 3. Configurations with `pyproject.toml`
+### 3. Configurations with `pyproject.toml`
 The `pyproject.toml` file contains configuration settings, including code linting rules (using `ruff`) and project metadata. To apply these settings, make sure to install `ruff`:
    ```bash
    pip install ruff
    ```
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/username/repo-name.git
-   cd repo-name
-### Dataset Structure (both hdf5 for DAS and SAC for Seismometer)
+## Dataset Structure (both hdf5 for DAS and SAC for Seismometer)
 **Important**: For the package to function correctly, the dataset must follow a specific directory structure. Ensure your data is organized as follows:    
    ```bash
    /dataset_parent_dir/
@@ -99,9 +93,9 @@ The `pyproject.toml` file contains configuration settings, including code lintin
    ```
 - **Waveform files** should be placed in YYYYMMDD subdirectories under the dataset_parent_dir.
 - Certain steps or programs may require that the dataset be placed in specific directories to operate correctly due to their original design.
-### Usage
+## Usage
 This package includes a Sphinx-generated documentation site and a Jupyter Notebook for a step-by-step guideline.     
-####  Documentation
+###  Documentation
 The documentation includes:
 - **Installation and Setup Guide**: Step-by-step instructions for setting up and using the package.
 - **API Reference**: Detailed explanations of each class, method, and function.
@@ -113,28 +107,28 @@ cd docs
 make html
 ```
 The documentation will be generated in `docs/_build/html` and can be opened in a browser.
-### Contributing
+## Contributing
 We encourage developers to contribute to this project. Here’s a quick guide:
 
 1. **Fork the repository** and **clone your fork** (recommended to work with the dev branch).
 2. **Create a new branch** for your feature or bug fix.
 3. **Make changes** and **commit** them.
 4. **Push to your branch** and **open a Pull Request** to the `dev` branch.
-### Roadmap
+## Roadmap
 Here are the planned future improvements for this project:
 
--  Interactive Visualization: Add interactive tools for visualizing and analyzing earthquake catalogs.
--  Enhanced Validation: Improved data validation checks to ensure datasets are correctly formatted and complete.
--  Performance Optimization: Memory and performance enhancements to better handle large datasets.
--  Additional Data Format Support: Add compatibility for other seismic data formats.
--  Refactoring Fortrans into Python: Replace existing Fortran code with Python implementations for better maintainability and compatibility.
--  Integration with Existing Tools: Integrate with popular seismic data processing tools and platforms.
+-  **Interactive Visualization**: Add interactive tools for visualizing and analyzing earthquake catalogs.
+-  **Enhanced Validation**: Improved data validation checks to ensure datasets are correctly formatted and complete.
+-  **Performance Optimization**: Memory and performance enhancements to better handle large datasets.
+-  **Additional Data Format Support**: Add compatibility for other seismic data formats.
+-  **Refactoring Fortrans into Python**: Replace existing Fortran code with Python implementations for better maintainability and compatibility.
+-  **Integration with Existing Tools**: Integrate with popular seismic data processing tools and platforms.
 
 The roadmap can adapt based on user feedback and new technology developments. If you’re interested in contributing to any of these features, check the [Contributing](#contributing) section.
-### License
+## License
 This project is licensed under the MIT License, which allows for reuse, modification, and distribution with minimal restrictions. See the [LICENSE](./LICENSE) file for the full MIT License text.
 
-#### Submodule Licenses
+### Submodule Licenses
 This repository includes third-party submodules with their own licensing terms:
 1. **GaMMA** - MIT License: Permissive license allowing free use, modification, and distribution.
 2. **EQNet** - Academic and Commercial License:
@@ -142,19 +136,19 @@ This repository includes third-party submodules with their own licensing terms:
    - Users must provide proper attribution in any publications resulting from its use.
 
 Please review each submodule’s `LICENSE` file for detailed terms.
-### Submodules and External Dependencies
+## Submodules and External Dependencies
 This project relies on the following external repositories as submodules:
 1. [**EQNet**](https://github.com/IES-ESLab/EQNet): A forked repository contains the PhaseNet, PhaseNet-DAS.
 2. [**GaMMA**](https://github.com/IES-ESLab/GaMMA): A forked repository contains the Gaussian Mixture Model for Earthquake Detection and Location.
-### References
+## References
 - Huang, Hsin-Hua, Wu, Y.-M., Song, X., Chang, C.-H., Lee, S.-J., Chang, T.-M., & Hsieh, H.-H. (2014). [**Joint Vp and Vs tomography of Taiwan: Implications for subduction-collision orogeny.**](https://www.sciencedirect.com/science/article/pii/S0012821X14000995?via%3Dihub) Earth Planet Science Letters, 392, 177–191. https://doi.org/10.1016/j.epsl.2014.02.026
 - Hsu, Yu-Fang & Huang, Hsin-Hua & Huang, Mong-Han & Tsai, Victor & Chuang, Ray & Feng, Kuan-Fu & Lin, S.‐H. (2020). [**Evidence for Fluid Migration During the 2016 Meinong, Taiwan, Aftershock Sequence.**](https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2020JB019994) Journal of Geophysical Research: Solid Earth. 125. 10.1029/2020JB019994.
-- Wu, Yih-Min et al. (2008) [**Focal-Mechanism Determination in Taiwan by Genetic Algorithm.**](https://pubs.geoscienceworld.org/ssa/bssa/article/98/2/651/350113/Focal-Mechanism-Determination-in-Taiwan-by-Genetic). Bulletin of the Seismological Society of America 2008;; 98 (2): 651–661. doi: https://doi.org/10.1785/0120070115
-- Zhu, Weiqiang et al. (2021) [**Earthquake Phase Association using a Bayesian Gaussian Mixture Model.**]() Journal of Geophysical Research: Solid Earth, 127, e2021JB023249. https://doi.org/10.1029/2021JB023249
-- Zhu, Weiqiang, and Gregory C. Beroza. (2018) [**PhaseNet: A Deep-Neural-Network-Based Seismic Arrival Time Picking Method.**]() Geophysical Journal International, Volume 216, Issue 1, January 2019, Pages 261–273, https://doi.org/10.1093/gji/ggy423
-- Zhu, Weiqiang et al. (2023) [**Seismic arrival-time picking on distributed acoustic sensing data using semi-supervised learning.**](https://www.nature.com/articles/s41467-023-43355-3) Nat Commun 14, 8192. https://doi.org/10.1038/s41467-023-43355-3
+- Wu, Yih-Min et al. (2008). [**Focal-Mechanism Determination in Taiwan by Genetic Algorithm.**](https://pubs.geoscienceworld.org/ssa/bssa/article/98/2/651/350113/Focal-Mechanism-Determination-in-Taiwan-by-Genetic). Bulletin of the Seismological Society of America 2008;; 98 (2): 651–661. doi: https://doi.org/10.1785/0120070115
+- Zhu, Weiqiang et al. (2021). [**Earthquake Phase Association using a Bayesian Gaussian Mixture Model.**](https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2021JB023249) Journal of Geophysical Research: Solid Earth, 127, e2021JB023249. https://doi.org/10.1029/2021JB023249
+- Zhu, Weiqiang, and Gregory C. Beroza. (2018). [**PhaseNet: A Deep-Neural-Network-Based Seismic Arrival Time Picking Method.**](https://academic.oup.com/gji/article/216/1/261/5129142) Geophysical Journal International, Volume 216, Issue 1, January 2019, Pages 261–273, https://doi.org/10.1093/gji/ggy423
+- Zhu, Weiqiang et al. (2023). [**Seismic arrival-time picking on distributed acoustic sensing data using semi-supervised learning.**](https://www.nature.com/articles/s41467-023-43355-3) Nat Commun 14, 8192. https://doi.org/10.1038/s41467-023-43355-3
 - Zhao, M., Xiao, Z., Zhang, M., Yang, Y., Tang, L., & Chen, S. (2023). [**DiTingMotion: A deep-learning first-motion-polarity classifier and its application to focal mechanism inversion.**](https://www.frontiersin.org/journals/earth-science/articles/10.3389/feart.2023.1103914/full) Frontiers in Earth Science, 11, 335.https://doi.org/10.3389/feart.2023.1103914
-### Contact
+## Contact
 If you have any questions or suggestions, feel free to reach out:
 - **Email**: [patrick.yang880612@gmail.com](mailto:patrick.yang880612@gmail.com)
 - **GitHub**: [@Pamicoding](https://github.com/Pamicoding)
