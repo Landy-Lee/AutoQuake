@@ -3,6 +3,7 @@
 /test_format
 /test/seis
 /test/das
+
 *.png
 gmt.history
 *.log
@@ -10,15 +11,19 @@ gmt.history
 *.dout
 *.P24
 *.ps
+# model
 /model_phasenet
+/model_phasenet_das
 
-# python file
+# test file
+test*.py
+play.py
 plot_design.py
 quick.py
 
+testset*
 # H3DD
 /H3DD/*.dat_ch
-/H3DD/tomops_H14
 /H3DD/*.out
 
 /gamma_result

@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -22,9 +25,9 @@ class GaMMA:
         picking_name_extract=lambda x: x.split('.')[1],
         center=None,
         xlim_degree=None,
-        x_interval=3,
+        x_interval=3.0,
         ylim_degree=None,
-        y_interval=3,
+        y_interval=3.0,
         zlim=(0, 60),
         degree2km=111.32,
         method='BGMM',
@@ -40,10 +43,45 @@ class GaMMA:
         min_picks_per_eq=8,
         min_p_picks_per_eq=6,
         min_s_picks_per_eq=2,
+        covariance_prior: list | None = None,
         max_sigma11=2.0,
         max_sigma22=1.0,
         max_sigma12=1.0,
     ):
+        """## Configuration of GaMMA
+
+        ### Args:
+            - station (Path): Path to the station file.
+            - pickings (Path): Path to the picking file.
+            - result_path (Path, optional): Path to the result directory. Defaults to None.
+            - picking_name_extract (Callable, optional): Function to extract the event name from the picking file. Defaults to lambda x: x.split('.')[1].
+            - center (tuple, optional): Center of the study area. Defaults to None.
+            - xlim_degree (tuple, optional): Longitude range of the study area. Defaults to None.
+            - x_interval (float, optional): Longitude interval of the study area. Defaults to 3.0.
+            - ylim_degree (tuple, optional): Latitude range of the study area. Defaults to None.
+            - y_interval (float, optional): Latitude interval of the study area. Defaults to 3.0.
+            - zlim (tuple, optional): Depth range of the study area. Defaults to (0, 60).
+            - degree2km (float, optional): Conversion factor from degree to km. Defaults to 111.32.
+            - method (str, optional): Method to use for association. Defaults to 'BGMM'.
+            - use_amplitude (bool, optional): Whether to use amplitude information. Defaults to False.
+            - vel_model (Path, optional): Path to the velocity model file. Defaults to None.
+            - vp (float, optional): P-wave velocity. Defaults to 6.0.
+            - vs (float, optional): S-wave velocity. Defaults to 6.0 / 1.75.
+            - vel_h (float, optional): Interval of grid for using velocity to compute travel time. Defaults to 1.0.
+            - use_dbscan (bool, optional): Whether to use DBSCAN for outlier removal. Defaults to True.
+            - dbscan_min_sample (int, optional): Minimum number of samples in a neighborhood for a point to be considered as a core point of a cluster. Defaults to 3.
+            - ncpu (int, optional): Number of CPUs to use. Defaults to 35.
+            - ins_type (str, optional): Type of instrument. Defaults to 'seis'.
+            - covariance_prior (list, optional): Prior covariance matrix, give a larger value if events are separated. Defaults to None.
+            #### These arguements are used for filtering low quality events.
+            - min_picks_per_eq (int, optional): Minimum number of picks per event. Defaults to 8.
+            - min_p_picks_per_eq (int, optional): Minimum number of P-wave picks per event. Defaults to 6.
+            - min_s_picks_per_eq (int, optional): Minimum number of S-wave picks per event. Defaults to 2.
+            - max_sigma11 (float, optional): Max phase time residual (s). Defaults to 2.0.
+            - max_sigma22 (float, optional): Max phase amplitude residual (in log scale). Defaults to 1.0.
+            - max_sigma12 (float, optional): Max covariance term. (Usually not used). Defaults to 1.0.
+
+        """
         self.station = station
         self.df_station = self._check_station(station)
         self.use_amplitude = use_amplitude
@@ -68,6 +106,7 @@ class GaMMA:
         self.min_picks_per_eq = min_picks_per_eq
         self.min_p_picks_per_eq = min_p_picks_per_eq
         self.min_s_picks_per_eq = min_s_picks_per_eq
+        self.covariance_prior = covariance_prior
         self.max_sigma11 = max_sigma11
         self.max_sigma22 = max_sigma22
         self.max_sigma12 = max_sigma12
@@ -91,7 +130,9 @@ class GaMMA:
         if use_amplitude == True.
         """
         df = pd.read_csv(self.pickings)
-        df['station_id'] = df['station_id'].map(self.picking_name_extract)
+        if self.picking_name_extract is not None:
+            df['station_id'] = df['station_id'].map(self.picking_name_extract)
+
         if self.use_amplitude:
             df[df['amp'] != -1]
         df.rename(
@@ -133,11 +174,18 @@ class GaMMA:
         """
         Estimate the picks per earthquake corresponded to ins type.
         """
-        if self.ins_type == 'DAS':
-            sta_num = len(self.df_station)
-            self.min_picks_per_eq = sta_num // 10  # suggested by author.
-            self.min_s_picks_per_eq = self.min_picks_per_eq // 3
-            self.min_p_picks_per_eq = self.min_picks_per_eq - self.min_s_picks_per_eq
+        if (
+            self.min_picks_per_eq is None
+            and self.min_p_picks_per_eq is None
+            and self.min_s_picks_per_eq is None
+        ):
+            if self.ins_type == 'DAS':
+                sta_num = len(self.df_station)
+                self.min_picks_per_eq = sta_num // 10  # suggested by author.
+                self.min_s_picks_per_eq = self.min_picks_per_eq // 3
+                self.min_p_picks_per_eq = (
+                    self.min_picks_per_eq - self.min_s_picks_per_eq
+                )
 
         config['min_picks_per_eq'] = self.min_picks_per_eq
         config['min_p_picks_per_eq'] = self.min_p_picks_per_eq
@@ -186,6 +234,9 @@ class GaMMA:
             'max_sigma12': self.max_sigma12,
         }
 
+        if self.covariance_prior is not None:
+            config['covariance_prior'] = self.covariance_prior
+
         config['bfgs_bounds'] = (
             (config['x(km)'][0] - 1, config['x(km)'][1] + 1),  # x
             (config['y(km)'][0] - 1, config['y(km)'][1] + 1),  # y
@@ -232,6 +283,7 @@ class GaMMA:
     def run_predict(self):
         self.config_gamma()
         self.df_picks = self._check_pickings()
+        logging.info(f'picks_num: {self.df_picks.head(10)}')
         event_idx0 = 0  ## current earthquake index
         assignments = []
         events, assignments = association(
@@ -242,8 +294,8 @@ class GaMMA:
             self.config['method'],
         )
         event_idx0 += len(events)
-
-        ## create catalog
+        logging.info(f'event_num: {event_idx0}')
+        ## create catalogs
         events = pd.DataFrame(events)
         events[['longitude', 'latitude']] = events.apply(
             lambda x: pd.Series(

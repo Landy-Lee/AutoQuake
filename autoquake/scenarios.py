@@ -28,9 +28,21 @@ def run_autoquake(
     use_magnitude=True,
     mag_processes=30,
     use_focal=True,
+    type_judge=None,
 ):
-    """
-    Run autoquake pipeline.
+    """## Run autoquake pipeline.
+
+    ### Args
+        - picker: PhaseNet object.
+        - associator: GaMMA object.
+        - relocator: H3DD object.
+        - pz_dir: Path to the directory containing the poles and zeros files.
+        - use_polarity: Whether to use polarity.
+        - use_magnitude: Whether to use magnitude.
+        - mag_processes: Number of processes to use for magnitude calculation.
+        - use_focal: Whether to use focal mechanism.
+        - type_judge: function for judging the type of station, use for focal mechanism.
+                      Using None as default, which means using the second character of station to judge the type of station.
     """
     # First part, need more configuration
     ## Run PhaseNet
@@ -38,7 +50,7 @@ def run_autoquake(
         logging.info('PhaseNet start')
         picker.run_predict()
         logging.info('PhaseNet end')
-        sac_parent_dir = Path(picker.data_parent_dir)
+        data_parent_dir = Path(picker.data_parent_dir)
         result_path = Path(picker.result_path)
 
     ## Run GaMMA
@@ -61,13 +73,23 @@ def run_autoquake(
     ## Polarity. Run DitingMotion
     if use_polarity:
         logging.info('DitingMotion start')
-        dt_focal = DitingMotion(
-            gamma_picks=gamma_picks,
-            sac_parent_dir=sac_parent_dir,
-            output_dir=result_path,
-        )
-        dt_focal.run_parallel_predict(processes=3)
-        polarity_picks = dt_focal.picks
+        if picker is not None:
+            if picker.format == 'SAC':
+                dt_focal = DitingMotion(
+                    gamma_picks=gamma_picks,
+                    sac_parent_dir=data_parent_dir,
+                    output_dir=result_path,
+                    type_judge=type_judge,
+                )
+            elif picker.format == 'h5':
+                dt_focal = DitingMotion(
+                    gamma_picks=gamma_picks,
+                    h5_parent_dir=data_parent_dir,
+                    output_dir=result_path,
+                    type_judge=type_judge,
+                )
+            dt_focal.run_parallel_predict(processes=3)
+            polarity_picks = dt_focal.picks
 
     ## Magnitude. Run Magnitude
     if use_magnitude:
@@ -77,7 +99,7 @@ def run_autoquake(
         mag = Magnitude(
             dout_file=dout_file,
             station=station,
-            sac_parent_dir=sac_parent_dir,
+            sac_parent_dir=data_parent_dir,
             pz_dir=pz_dir,
             output_dir=result_path,
         )
@@ -91,27 +113,25 @@ def run_autoquake(
         output_dir = Path(__file__).parents[1].resolve() / 'GAfocal'
         dout_file_name = dout_file.name
         if use_magnitude:
-            if not (output_dir / dout_file.name).exists():
-                logging.info('Format converting with pol and mag...')
-                dout_file_name = H3DD.pol_mag_to_dout(
-                    ori_dout=dout_file,
-                    gamma_reorder_event=gamma_reorder_event,
-                    polarity_picks=polarity_picks,
-                    magnitude_events=mag_events,
-                    magnitude_picks=mag_picks,
-                    output_path=output_dir,
-                )
-                logging.info('Format converting over.')
+            logging.info('Format converting with pol and mag...')
+            dout_file_name = H3DD.pol_mag_to_dout(
+                ori_dout=dout_file,
+                gamma_reorder_event=gamma_reorder_event,
+                polarity_picks=polarity_picks,
+                magnitude_events=mag_events,
+                magnitude_picks=mag_picks,
+                output_path=output_dir,
+            )
+            logging.info('Format converting over.')
         else:
-            if not (output_dir / dout_file.name).exists():
-                logging.info('Format converting with pol...')
-                dout_file_name = H3DD.pol_to_dout(
-                    ori_dout=dout_file,
-                    gamma_reorder_event=gamma_reorder_event,
-                    polarity_picks=polarity_picks,
-                    output_path=output_dir,
-                )
-                logging.info('Format converting over.')
-        gafocal = GAfocal(dout_file_name=dout_file_name)
+            logging.info('Format converting with pol...')
+            dout_file_name = H3DD.pol_to_dout(
+                ori_dout=dout_file,
+                gamma_reorder_event=gamma_reorder_event,
+                polarity_picks=polarity_picks,
+                output_path=output_dir,
+            )
+            logging.info('Format converting over.')
+        gafocal = GAfocal(dout_file_name=dout_file_name, result_path=result_path)
         gafocal.run()
         logging.info('GAfocal end')

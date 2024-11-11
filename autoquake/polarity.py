@@ -20,6 +20,10 @@ diting_model = (
 warnings.filterwarnings('ignore')
 
 
+def default_type_judge(x: str):
+    return True if x[1].isalpha() else False
+
+
 def formatting(num):
     """Format number to have leading zero if needed."""
     return f'0{num}' if len(num) == 1 else num
@@ -70,8 +74,21 @@ class DitingMotion:
         sac_parent_dir=None,
         h5_parent_dir=None,
         interval=300,
-        sampling_rate=100,
+        sampling_rate=100.0,
+        type_judge=None,
     ):
+        """## Using DitingMotion to predict the polarity of the P-wave
+
+        ### Args:
+            - gamma_picks: Path to the gamma picks file
+            - model_path: Path to the model file
+            - output_dir: Path to the output directory
+            - sac_parent_dir: Path to the sac parent directory if using .SAC files.
+            - h5_parent_dir: Path to the h5 parent directory if using .h5 files.
+            - interval: Interval of the h5 data to be used for searching specific 300s data.
+            - sampling_rate: Sampling rate of the data.
+            - type_judge: Function to judge the type of the station through name.
+        """
         self.gamma_picks = gamma_picks
         self.model_path = model_path
         self.output_dir = self._check_output(output_dir)
@@ -79,9 +96,16 @@ class DitingMotion:
         self.h5_parent_dir = h5_parent_dir
         self.interval = interval
         self.sampling_rate = sampling_rate
+        self.type_judge = self._check_type_judge(type_judge)
         self.indices = self._get_indices()
         self._set_thread_options()
         self.picks = self.output_dir / 'polarity_picks.csv'
+
+    def _check_type_judge(self, type_judge):
+        if type_judge is None:
+            return default_type_judge
+        else:
+            return type_judge
 
     def _check_output(self, output):
         if output is not None:
@@ -116,6 +140,9 @@ class DitingMotion:
         return stream
 
     def seis_get_data(self, sta_name: str, p_arrival_: str, time_window=0.64):
+        """
+        Get the 1.28 s waveform data for traning.
+        """
         ymd = time_formatting(p_arrival_)
         p_arrival = UTCDateTime(p_arrival_)
         if self.sac_parent_dir is not None:
@@ -134,7 +161,7 @@ class DitingMotion:
             st.detrend('demean')
             st.detrend('linear')
             st.taper(0.001)
-            st.resample(sampling_rate=100)
+            st.resample(sampling_rate=self.sampling_rate)
             starttime_trim = p_arrival - time_window
             endtime_trim = p_arrival + time_window
             st.trim(starttime=starttime_trim, endtime=endtime_trim)
@@ -148,6 +175,9 @@ class DitingMotion:
 
     # for DAS
     def das_for_model(self, data, total_seconds):
+        """
+        Calculating the index range of the data for the model input.
+        """
         event_index = int((total_seconds % self.interval) * self.sampling_rate)
         return data[
             event_index - int(0.64 * self.sampling_rate) : event_index
@@ -155,12 +185,16 @@ class DitingMotion:
         ]
 
     def das_get_data(self, sta_name: str, p_arrival: str):
+        """
+        Get the 1.28 s DAS data for traning.
+        """
+        ymd = time_formatting(p_arrival)
         total_seconds = get_total_seconds(pd.to_datetime(p_arrival))
         index = int(total_seconds // self.interval)
         window = f'{self.interval*index}_{self.interval*(index+1)}.h5'
         if self.h5_parent_dir is not None:
             try:
-                file = list(self.h5_parent_dir.glob(f'*{window}'))[0]
+                file = list((self.h5_parent_dir / ymd).glob(f'*{window}'))[0]
             except IndexError:
                 logging.info(f'File not found for window {window}')
                 return []
@@ -182,6 +216,9 @@ class DitingMotion:
         return data
 
     def diting_motion(self, data, row, motion_model):
+        """
+        Predicting the polarity.
+        """
         # create zeros array
         motion_input = np.zeros([1, 128, 2], dtype=np.float32)
         try:
@@ -255,12 +292,15 @@ class DitingMotion:
             return 'x'
 
     def process_row(self, row, motion_model) -> pd.DataFrame:
-        if row.station_id[1].isdigit():
+        """
+        Processing the row from dataframe, deciding whether the station type is DAS or seismometer by giving function.
+        """
+        if self.type_judge(row.station_id):
             data = self.das_get_data(
                 sta_name=row.station_id,
                 p_arrival=row.phase_time,
             )
-        elif row.station_id[1].isalpha():
+        elif self.type_judge(row.station_id):
             data = self.seis_get_data(
                 sta_name=row.station_id, p_arrival_=row.phase_time
             )

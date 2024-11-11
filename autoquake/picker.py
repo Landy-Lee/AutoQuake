@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import logging
 import multiprocessing
@@ -74,8 +76,48 @@ class PhaseNet:
         location: str | None = None,  # DAS
         skip_existing=False,  # DAS
     ):
-        """
-        Initialize PhaseNet.
+        """## A class for running EQNet model using pythonic interface.
+
+        Previous way to call the ML model is to use command line interface wrote by argparse.
+        This class is a wrapper for the command line interface, which makes it easier to use the ML model in python.
+
+        ### Args:
+            - data_parent_dir (Path): Path to the parent directory of the data.
+            - start_ymd (str): Start date in YYYYMMDD format.
+            - end_ymd (str): End date in YYYYMMDD format.
+            - data_list (str | None, optional): Path to the data list file. If None, the data list will be generated based on the start and end dates. Defaults to None.
+            - result_path (Path | None, optional): Path to the directory where the results will be saved. If None, the results will be saved in the parent directory of current directory. Defaults to None.
+            - hdf5_file (str | None, optional): Path of hdf5 file for training. If None, the hdf5 file will be generated based on the data list. Defaults to None.
+            - prefix (str, optional): Prefix for the file name. Defaults to ''.
+            - format (str, optional): Format of the data. Defaults to 'h5'.
+            - dataset (str, optional): Dataset to use. Defaults to 'das'.
+            - model (str, optional): Model to use. Defaults to 'phasenet_das'.
+            - resume (str, optional): Path to the checkpoint file. Defaults to ''.
+            - backbone (str, optional): Backbone to use. Defaults to 'unet'.
+            - phases (list, optional): Phases to detect. Defaults to ['P', 'S'].
+            - device (str, optional): Device to use. Defaults to 'cuda'.
+            - workers (int, optional): Number of workers to use. Defaults to 0.
+            - batch_size (int, optional): Batch size to use. Defaults to 1.
+            - use_deterministic_algorithms (bool, optional): Whether to use deterministic algorithms. Defaults to True.
+            - amp (bool, optional): Whether to use automatic mixed precision. Defaults to True.
+            - world_size (int, optional): Number of GPUs to use. Defaults to 1.
+            - dist_url (str, optional): URL used to set up distributed training. Defaults to 'env://'.
+            - plot_figure (bool, optional): Whether to plot the figure. Defaults to False.
+            - min_prob (float, optional): Minimum probability to use. Defaults to 0.3.
+            - add_polarity (bool, optional): Whether to add polarity. Defaults to False.
+            - add_event (bool, optional): Whether to use event information. Defaults to True.
+            - sampling_rate (float, optional): Sampling rate. Defaults to 100.0.
+            - highpass_filter (float | None, optional): Highpass filter. If None, no highpass filter will be used. Defaults to None (give 0.0 if use phasenet_das).
+            - response_path (str | None, optional): Path to the response file. If None, no response will be used. Defaults to None.
+            - subdir_level (int, optional): Number of subdirectories to use. Defaults to 0.
+            - cut_patch (bool, optional): Whether to cut patch. Defaults to False.
+            - nt (int, optional): Number of time samples. Defaults to 1024 * 20.
+            - nx (int, optional): Number of spatial samples. Defaults to 1024 * 5.
+            - resample_time (bool, optional): Whether to resample time. Defaults to False.
+            - resample_space (bool, optional): Whether to resample space. Defaults to False.
+            - system (str | None, optional): System to use. If None, no system will be used. Defaults to None.
+            - location (str | None, optional): The name of systems at location. If None, no location will be used. Defaults to None.
+            - skip_existing (bool, optional): Whether to skip existing files. Defaults to False.
         """
         self.data_parent_dir = data_parent_dir
         self.start_ymd = start_ymd
@@ -114,19 +156,30 @@ class PhaseNet:
         self.system = system
         self.location = location
         self.skip_existing = skip_existing
-        self.picks = (
-            self.result_path / f'picks_{model}' / f'{start_ymd}_{end_ymd}' / 'picks.csv'
-        )
         # Initialize instance variables based on parsed self.args
         self.input_to_args()
 
-    def _check_result_dir(self, result_path) -> Path:
+        self.picks = self.result_path / f'picks_{model}' / self.dir_name / 'picks.csv'
+
+    def _check_result_dir(self, result_path: Path | None) -> Path:
+        """## Check whether result directory exists or not
+
+        ### Args:
+            - result_path (str | None, optional): Path to the result directory. If None, the default path will be used. Defaults to None.
+        """
         if result_path is None:
             return Path(__file__).parents[1].resolve() / 'phasenet_result'
         else:
             return result_path
 
     def date_range(self):
+        """## Get date range from start_ymd to end_ymd
+
+        This step is to generate a list of dates in the format of '%Y%m%d' for parallel processing.
+
+        Reutrn:
+            - date_list (list): List of dates in the format of '%Y%m%d'
+        """
         start_date = datetime.strptime(self.start_ymd, '%Y%m%d')
         end_date = datetime.strptime(self.end_ymd, '%Y%m%d')
         delta = end_date - start_date
@@ -134,11 +187,20 @@ class PhaseNet:
         for i in range(delta.days + 1):
             date = start_date + timedelta(days=i)
             date_list.append(date.strftime('%Y%m%d'))
+        available_date = os.listdir(str(self.data_parent_dir))
+        date_list = [date for date in date_list if date in available_date]
+
+        if len(date_list) == 1:
+            self.dir_name = date_list[0]
+        else:
+            self.dir_name = f'{date_list[0]}_{date_list[-1]}'
+        logging.info(f'Using {date_list} as predicting range')
         return date_list
 
     def input_to_args(self):
-        """
-        Converting input arguments to argparse.Namespace.
+        """## Converting input arguments to argparse.Namespace.
+
+        Converting it in a args_list for parallel processing.
         """
         self.args_list = []
         self.date_list = self.date_range()
@@ -185,32 +247,55 @@ class PhaseNet:
             self.args_list.append(args)
 
     def _check_data_list(self, data_list, data_path: Path):
-        if data_list is None:
-            all_list = list(data_path.glob(f'*{self.format}'))
-            data_list = []
-            for i in all_list:
-                fname = f"{str(i).split('.D.')[0][:-1]}*"
-                if fname not in data_list:
-                    data_list.append(fname)
+        """## Check whether data_list exists or not
+
+        Default to class is to set the data_list=None that we can generate it from data_path.
+        """
+        if self.format != 'h5':
+            if data_list is None:
+                all_list = list(data_path.glob(f'*{self.format}'))
+                data_list = []
+                for i in all_list:
+                    fname = f"{str(i).split('.D.')[0][:-1]}*"
+                    if fname not in data_list:
+                        data_list.append(fname)
+            else:
+                with open(data_list) as f:
+                    data_list = f.read().splitlines()
         else:
-            with open(data_list) as f:
-                data_list = f.read().splitlines()
+            pass
         return data_list
 
     def concat_picks(self):
+        """## Concatenate daily picks to a single csv file.
+
+        There exists 2 scenario:
+            1. single day: generating picks.csv in ymd directory.
+            2. multiple days: generating picks.csv in {start_ymd}_{end_ymd} directory.
+
+        """
         concat_list = []
         for date in self.date_list:
             # TODO: What about DAS data?
             picks_path = self.result_path / f'picks_{self.model}'
-            df = pd.read_csv(picks_path / f'{date}.csv')
-            concat_list.append(df)
+            if self.model == 'phasenet':
+                df = pd.read_csv(
+                    picks_path / f'{date}.csv'
+                )  # because phasenet automatic combined the daily picks outside the dir.
+                concat_list.append(df)
+            elif self.model == 'phasenet_das':
+                csv_list = list((picks_path / date).glob('*.csv'))
+                for csv_ in csv_list:
+                    df = pd.read_csv(csv_)
+                    # Converting the channel_index into a string-like station name.
+                    df['station_id'] = df['channel_index'].astype(str).str.zfill(4)
+                    df['station_id'] = df['station_id'].apply(
+                        lambda x: f'A{x[1:]}' if x[0] == '0' else f'B{x[1:]}'
+                    )
+                    concat_list.append(df)
 
         result = pd.concat(concat_list)
-        date_dir = (
-            self.result_path
-            / f'picks_{self.model}'
-            / f'{self.date_list[0]}_{self.date_list[-1]}'
-        )
+        date_dir = self.result_path / f'picks_{self.model}' / self.dir_name
         date_dir.mkdir(parents=True, exist_ok=True)
         result.to_csv(
             date_dir / 'picks.csv',
@@ -674,7 +759,7 @@ class PhaseNet:
             in_channels=1,
             out_channels=(len(args.phases) + 1),
         )
-        logger.info(f'Model:\n{model}')
+        # logger.info(f'Model:\n{model}')
 
         model.to(device)
         if args.distributed:
@@ -741,6 +826,7 @@ class PhaseNet:
         # return os.path.join(pick_path, 'picks.csv')
 
     def run_predict(self, processes=3):
+        """## Main function to run."""
         with multiprocessing.Pool(processes=processes) as pool:
             pool.map(self.predict, self.args_list)
         self.concat_picks()

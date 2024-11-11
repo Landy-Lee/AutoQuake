@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -47,27 +49,26 @@ class H3DD:
         joint_inv_with_single_event_method=1,
         consider_elevation=0,
     ):
-        """
-        ## Using 3D model for hypoDD.
+        """## Using 3D model for hypoDD.
 
         ### Args:
-            gamma_event (Path): Path to the gamma event file.
-            gamma_picks (Path): Path to the gamma picks file.
-            model_3d (Path): Path to the 3D model file.
-            event_name (str): Name of the event.
-            weights (list of float): Weighting for P-wave, S-wave, and single event data.
+            - gamma_event (Path): Path to the gamma event file.
+            - gamma_picks (Path): Path to the gamma picks file.
+            - model_3d (Path): Path to the 3D model file.
+            - event_name (str): Name of the event.
+            - weights (list of float): Weighting for P-wave, S-wave, and single event data.
                 Example: [1.0, 1.0, 0.1]
-            priori_weight (list of float): A priori weighting for catalog data.
+            - priori_weight (list of float): A priori weighting for catalog data.
                 Example: [1.0, 0.75, 0.5, 0.25, 0.0]
-            cut_off_distance_for_dd (float): Cut-off distance for hypoDD (in km).
-            inv (int): Inversion method. (1 = SVD, 2 = LSQR)
-            damping_factor (float): Damping factor for LSQR.
-            rmscut (float): RMS cut-off threshold.
-            max_iter (int): Maximum number of iterations.
-            constrain_factor (float): Constrain factor.
-            joint_inv_with_single_event_method (int): Joint inversion with single event method.
+            - cut_off_distance_for_dd (float): Cut-off distance for hypoDD (in km).
+            - inv (int): Inversion method. (1 = SVD, 2 = LSQR)
+            - damping_factor (float): Damping factor for LSQR.
+            - rmscut (float): RMS cut-off threshold.
+            - max_iter (int): Maximum number of iterations.
+            - constrain_factor (float): Constrain factor.
+            - joint_inv_with_single_event_method (int): Joint inversion with single event method.
                 (1 = yes, 0 = no)
-            consider_elevation (int): Whether to consider elevation in the model.
+            - consider_elevation (int): Whether to consider elevation in the model.
                 (1 = yes, 0 = no)
         """
         PROJECT_ROOT = Path(__file__).parents[1].resolve()
@@ -90,6 +91,7 @@ class H3DD:
         self.consider_elevation = consider_elevation
         self.reorder_event = self.gamma_event.parent / 'gamma_reorder_event.csv'
         self.dout = self.h3dd_dir / f'{event_name}.dat_ch.dout'
+        self.hout = self.h3dd_dir / f'{event_name}.dat_ch.hout'
 
     def _station_h3dd_format(self, station: Path):
         """
@@ -321,6 +323,9 @@ class H3DD:
             if result.returncode != 0:
                 print('Error occurred during h3dd execution.')
 
+        os.system(f'cp {self.hout} {self.gamma_event.parent}')
+        os.system(f'cp {self.dout} {self.gamma_event.parent}')
+
     def just_run(self, dat_ch: Path):
         self.config_h3dd_inp(dat_ch=dat_ch)
 
@@ -344,7 +349,7 @@ class H3DD:
         concat the dout and hout once the file_num > 1.
         """
         if self.file_num > 1:
-            for ftype in ['hout', 'dout']:
+            for ftype in ['dat_ch.hout', 'dat_ch.dout']:
                 output_file = self.h3dd_dir / f'{self.event_name}.{ftype}'
                 with open(output_file, 'w') as outfile:
                     for i in range(self.file_num):
