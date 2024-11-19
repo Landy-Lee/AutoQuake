@@ -186,11 +186,12 @@ class Magnitude:
             else:
                 return ymd, prioriry_elements
 
-    def process_h3dd(self):
+    @staticmethod
+    def process_h3dd(dout_file: Path, station_info: Path):
         """
         Processing h3dd into mag ready format
         """
-        with open(self.dout_file) as f:
+        with open(dout_file) as f:
             lines = f.readlines()
 
         mag_event_header = [
@@ -216,7 +217,7 @@ class Magnitude:
             'h3dd_event_index',
         ]
         df_station = pd.read_csv(
-            self.station_info,
+            station_info,
             dtype={
                 'station': 'str',
                 'longitude': 'float',
@@ -226,7 +227,7 @@ class Magnitude:
         )
         mag_event_list = []
         mag_picks_list = []
-        event_index = 0
+        event_index = -1
         for line in lines:
             if line.strip()[0].isdigit():
                 event_index += 1
@@ -293,9 +294,9 @@ class Magnitude:
                         event_index,
                     ]
                 )
-        # Write it into dataframe
-        self.df_h3dd_events = pd.DataFrame(mag_event_list, columns=mag_event_header)
-        self.df_h3dd_picks = pd.DataFrame(mag_picks_list, columns=mag_picks_header)
+        df_h3dd_events = pd.DataFrame(mag_event_list, columns=mag_event_header)
+        df_h3dd_picks = pd.DataFrame(mag_picks_list, columns=mag_picks_header)
+        return df_h3dd_events, df_h3dd_picks
 
     def _kinethreshold(
         self, comp_list: set[str], station: str, t1: UTCDateTime, t2: UTCDateTime
@@ -533,7 +534,9 @@ class Magnitude:
         """
         Spawn processes to run `get_mag` for multiple event indices in parallel.
         """
-        self.process_h3dd()
+        self.df_h3dd_events, self.df_h3dd_picks = self.process_h3dd(
+            dout_file=self.dout_file, station_info=self.station_info
+        )
 
         event_indices = set(self.df_h3dd_events['h3dd_event_index'])
 
