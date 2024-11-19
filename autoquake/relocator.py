@@ -379,7 +379,7 @@ class H3DD:
         with open(output_dout, 'w') as fo:
             with open(ori_dout) as r:
                 lines = r.readlines()
-            h3dd_event_index = 0
+            h3dd_event_index = -1
             for line in lines:
                 if line.strip().split()[-1] == '3DD':
                     h3dd_event_index += 1
@@ -436,7 +436,7 @@ class H3DD:
         with open(output_dout, 'w') as fo:
             with open(ori_dout) as r:
                 lines = r.readlines()
-            h3dd_event_index = 0
+            h3dd_event_index = -1
             for line in lines:
                 if line.strip().split()[-1] == '3DD':
                     h3dd_event_index += 1
