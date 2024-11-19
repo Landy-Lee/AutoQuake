@@ -1,453 +1,79 @@
 # import os
 # import glob
 # import math
-import logging
 
 # import calendar
 # from datetime import datetime, timedelta
 from pathlib import Path
 
 import cartopy.crs as ccrs
-import h5py
+import cartopy.feature as cfeature
 import matplotlib.pyplot as plt
 
 # from matplotlib.ticker import MultipleLocator
-import numpy as np
 import pandas as pd
-import pygmt
+from cartopy.mpl.geoaxes import GeoAxes
 
 # from obspy.imaging.beachball import beach
-from geopy.distance import geodesic
-from matplotlib.colors import LightSource
-from matplotlib.gridspec import GridSpec
-
 # import multiprocessing as mp
 # from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
-from obspy import Trace, UTCDateTime, read
-
 # from collections import defaultdict
 # from pyrocko import moment_tensor as pmt
 # from pyrocko.plot import beachball, mpl_color
-from ._plot_base import (
-    check_format,
-    convert_channel_index,
-    get_total_seconds,
-    plot_waveform_check,
-    station_mask,
-)
+from ._plot_base import *
+from .comp_plot import find_compared_gafocal_polarity
 
 
-def preprocess_gamma_csv(
-    gamma_catalog: Path, gamma_picks: Path, event_i: int, h3dd_hout=None
-) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
-    """
-    Preprocessing the DataFrame for each event index.
-
-    This function takes the Path object from catalog and picks generated
-    by GaMMA, creating the DataFrame object for later utilization.
-
-    Parameters
-    ----------
-    gamma_catalog : Path
-        The path of gamma_events.csv
-    gamma_picks : Path
-        The path of gamma_picks.csv
-
-    Returns
-    -------
-    df_event : DataFrame
-        The DataFrame object of the gamma events i's event information.
-    event_dict : dict
-        The dictionary contains the needed event information.
-    df_event_picks : DataFrame
-        The DataFrame object of the gamma events i's associated picks.
-    h3dd_hout (optional, if you want to use h3dd info) : Path
-        The path of h3dd.hout
-    """
-    df_catalog = pd.read_csv(gamma_catalog)
-    df_event = df_catalog[df_catalog['event_index'] == event_i].copy()
-    df_event.loc[:, 'datetime'] = pd.to_datetime(df_event['time'])
-    df_event.loc[:, 'ymd'] = df_event['datetime'].dt.strftime('%Y%m%d')
-    df_event.loc[:, 'hour'] = df_event['datetime'].dt.hour
-    df_event.loc[:, 'minute'] = df_event['datetime'].dt.minute
-    df_event.loc[:, 'seconds'] = (
-        df_event['datetime'].dt.second + df_event['datetime'].dt.microsecond / 1_000_000
-    )
-    event_dict = {}
-    event_dict[
-        'gamma'
-    ] = {}  # the reason I don't want to use defaultdict is to limit it.
-    event_dict['gamma'] = {
-        'date': df_event['ymd'].iloc[0],
-        'event_time': df_event['time'].iloc[0],
-        'event_total_seconds': get_total_seconds(df_event['datetime'].iloc[0]),
-        'event_lat': df_event['latitude'].iloc[0],
-        'event_lon': df_event['longitude'].iloc[0],
-        'event_point': (df_event['latitude'].iloc[0], df_event['longitude'].iloc[0]),
-        'event_depth': df_event['depth_km'].iloc[0],
-    }
-    if h3dd_hout is not None:
-        event_dict['h3dd'] = {}
-        df_h3dd, _ = check_format(h3dd_hout)
-        df_h3dd['datetime'] = pd.to_datetime(df_h3dd['time'])
-        df_h3dd['datetime'].map(get_total_seconds)
-        # TODO: Using the first row is not always the correct way. We better have index to reference.
-        target = df_h3dd[
-            abs(
-                df_h3dd['datetime'].map(get_total_seconds)
-                - get_total_seconds(df_event['datetime'].iloc[0])
-            )
-            < 3
-        ].iloc[0]
-        event_dict['h3dd'] = {
-            'event_time': target.time,
-            'event_total_seconds': get_total_seconds(target.datetime),
-            'event_lat': target.latitude,
-            'event_lon': target.longitude,
-            'event_point': (target.latitude, target.longitude),
-            'event_depth': target.depth_km,
-        }
-
-    df_picks = pd.read_csv(gamma_picks)
-    df_event_picks = df_picks[df_picks['event_index'] == event_i].copy()
-    # TODO: does there have any possible scenario?
-    # df_event_picks['station_id'] = df_event_picks['station_id'].map(lambda x: str(x).split('.')[1])
-    df_event_picks.loc[:, 'phase_time'] = pd.to_datetime(df_event_picks['phase_time'])
-
-    return df_event, event_dict, df_event_picks
+def _find_asso_map(df_seis_station: pd.DataFrame, df_das_station: pd.DataFrame):
+    """## return a code for map setting."""
+    if df_seis_station.empty:
+        # typically, only DAS
+        pass
+    elif df_das_station.empty:
+        # typically, only seismic
+        pass
+    else:
+        # both seismic and DAS
+        pass
 
 
-def preprocess_phasenet_csv(
-    phasenet_picks: Path, get_station=lambda x: str(x).split('.')[1]
-):
-    df_all_picks = pd.read_csv(phasenet_picks)
-    df_all_picks['phase_time'] = pd.to_datetime(df_all_picks['phase_time'])
-    df_all_picks['total_seconds'] = df_all_picks['phase_time'].apply(get_total_seconds)
-    # df_all_picks['system'] = df_all_picks['station_id'].apply(
-    #     lambda x: str(x).split('.')[0]
-    # )  # TW or MiDAS blablabla
-    df_all_picks['station'] = df_all_picks['station_id'].apply(
-        get_station
-    )  # LONT (station name) or A001 (channel name)
-    return df_all_picks
-
-
-def find_das_data(
-    event_index: int,
-    hdf5_parent_dir: Path,
-    polarity_picks: Path,
-    interval=300,
-    train_window=0.64,
-    visual_window=2,
-    sampling_rate=100,
-    station_mask=station_mask,
-):
-    """
-    temp function, disentangle is needed.
-    """
-    df_pol = pd.read_csv(polarity_picks)
-    df_pol.rename(columns={'station_id': 'station'}, inplace=True)
-    df_pol_clean = df_pol[df_pol['event_index'] == event_index]
-    df_pol_clean = df_pol_clean[df_pol_clean['station'].map(station_mask)]
-    das_plot_dict = {}
-    for _, row in df_pol_clean.iterrows():
-        if row.polarity == 'U':
-            polarity = '+'
-        elif row.polarity == 'D':
-            polarity = '-'
-        else:
-            polarity = ' '
-        total_seconds = get_total_seconds(pd.to_datetime(row.phase_time))
-        index = int(total_seconds // interval)
-        window = f'{interval*index}_{interval*(index+1)}.h5'
-        try:
-            file = list(hdf5_parent_dir.glob(f'*{window}'))[0]
-        except IndexError:
-            logging.info(f'File not found for window {window}')
-
-        channel_index = convert_channel_index(row.station)
-        tr = Trace()
-        try:
-            with h5py.File(file, 'r') as fp:
-                ds = fp['data']
-                data = ds[channel_index]
-                tr.stats.sampling_rate = 1 / ds.attrs['dt_s']
-                tr.stats.starttime = ds.attrs['begin_time']
-                tr.data = data
-            p_arrival = UTCDateTime(row.phase_time)
-            train_starttime_trim = p_arrival - train_window
-            train_endtime_trim = p_arrival + train_window
-            window_starttime_trim = p_arrival - visual_window
-            window_endtime_trim = p_arrival + visual_window
-
-            tr.detrend('demean')
-            tr.detrend('linear')
-            tr.filter('bandpass', freqmin=1, freqmax=10)
-            tr.taper(0.001)
-            tr.resample(sampling_rate=sampling_rate)
-            # this is for visualize length
-            tr.trim(starttime=window_starttime_trim, endtime=window_endtime_trim)
-            visual_time = np.arange(
-                0, 2 * visual_window + 1 / sampling_rate, 1 / sampling_rate
-            )  # using array to ensure the time length as same as time_window.
-            visual_sac = tr.data
-            # this is actual training length
-            tr.trim(starttime=train_starttime_trim, endtime=train_endtime_trim)
-            start_index = visual_window - train_window
-            train_time = np.arange(
-                start_index,
-                start_index + 2 * train_window + 1 / sampling_rate,
-                1 / sampling_rate,
-            )  # using array to ensure the time length as same as time_window.
-            train_sac = tr.data
-            # final writing
-            if 'station_info' not in das_plot_dict:
-                das_plot_dict['station_info'] = {}
-            das_plot_dict['station_info'][row.station] = {
-                'polarity': polarity,
-                'p_arrival': p_arrival,
-                'visual_time': visual_time,
-                'visual_sac': visual_sac,
-                'train_time': train_time,
-                'train_sac': train_sac,
-            }
-        except Exception as e:
-            print(e)
-    return das_plot_dict
-
-
-def find_sac_data(
-    event_time: str,
-    date: str,
-    event_point: tuple[float, float],
-    station_list: Path,
-    sac_parent_dir: Path,
-    sac_dir_name: str,
-    amplify_index: float,
-    ins_type='seis',
-) -> dict:
-    """
-    Retrieve the waveform from SAC.
-
-    This function glob the sac file from each station, multiplying the
-    amplify index to make the PGA/PGV more clear, then packs the
-    waveform data into dictionary for plotting.
-
-    """
-    starttime_trim = UTCDateTime(event_time) - 30
-    endtime_trim = UTCDateTime(event_time) + 60
-    df_station = pd.read_csv(station_list)
-    if ins_type == 'seis':
-        df_station = df_station[df_station['station'].apply(lambda x: x[1].isalpha())]
-    # *** TODO: Adding the read hdf5 for DAS
-    elif ins_type == 'DAS':
-        df_station = df_station[df_station['station'].apply(lambda x: x[1].isdigit())]
-
-    sac_path = sac_parent_dir / date / sac_dir_name
-    sac_dict = {}
-    for sta in df_station['station'].to_list():
-        # glob the waveform
-        try:
-            data_path = list(sac_path.glob(f'*{sta}.*Z.*'))[0]
-        except Exception:
-            logging.info(f"we can't access the {sta}")
-            continue
-
-        sta_point = (
-            df_station[df_station['station'] == sta]['latitude'].iloc[0],
-            df_station[df_station['station'] == sta]['longitude'].iloc[0],
-        )
-        dist = geodesic(event_point, sta_point).km
-        dist_round = np.round(dist, 1)
-
-        # read the waveform
-        st = read(data_path)
-        st.taper(type='hann', max_percentage=0.05)
-        st.filter('bandpass', freqmin=1, freqmax=10)
-        st_check = True
-        if starttime_trim < st[0].stats.starttime:
-            st_check = False
-        st[0].trim(starttime=starttime_trim, endtime=endtime_trim)
-        sampling_rate = 1 / st[0].stats.sampling_rate
-        time_sac = np.arange(
-            0, 90 + sampling_rate, sampling_rate
-        )  # using array to ensure the time length as same as time_window.
-        x_len = len(time_sac)
-        try:
-            data_sac_raw = st[0].data / max(st[0].data)  # normalize the amplitude.
-        except Exception as e:
-            logging.info(f'Error: {e}')
-            logging.info(f'check the length of given time: {len(st[0].data)}')
-            continue
-        data_sac_raw = data_sac_raw * amplify_index + dist
-        # we might have the data lack in the beginning:
-        if not st_check:
-            data_sac = np.pad(
-                data_sac_raw,
-                (x_len - len(data_sac_raw), 0),
-                mode='constant',
-                constant_values=np.nan,
-            )  # adding the Nan to ensure the data length as same as time window.
-        else:
-            data_sac = np.pad(
-                data_sac_raw,
-                (0, x_len - len(data_sac_raw)),
-                mode='constant',
-                constant_values=np.nan,
-            )  # adding the Nan to ensure the data length as same as time window.
-
-        sac_dict[str(sta)] = {
-            'time': time_sac,
-            'sac_data': data_sac,
-            'distance': dist_round,
-        }
-    return sac_dict
-
-
-def find_phasenet_pick(
-    event_total_seconds: float,
-    sac_dict: dict,
-    df_all_picks: pd.DataFrame,
-    first_half=30,
-    second_half=60,
-    dx=4.084,
-    dt=0.01,
-    hdf5_time=300,
-    station_mask=station_mask,
-):
-    """
-    Filtering waveform in specific time window and convert it for scatter plot.
-    """
-    time_window_start = event_total_seconds - first_half
-    time_window_end = event_total_seconds + second_half
-    pick_time = df_all_picks['total_seconds'].to_numpy()
-    df_event_picks = df_all_picks[
-        (pick_time >= time_window_start) & (pick_time <= time_window_end)
-    ]
-
-    df_seis_picks = df_event_picks[df_event_picks['station'].map(station_mask)]
-    if not df_seis_picks.empty:
-        df_seis_picks['x'] = (
-            df_seis_picks['total_seconds'] - event_total_seconds + first_half
-        )  # Because we use -30 as start.
-        df_seis_picks['y'] = df_seis_picks['station'].map(
-            lambda x: sac_dict[x]['distance']
-        )
-
-    df_das_picks = df_event_picks[~df_event_picks['station'].map(station_mask)]
-    if not df_das_picks.empty:
-        df_das_picks['channel_index'] = df_das_picks['station'].map(
-            convert_channel_index
-        )
-        df_das_picks['x'] = (
-            df_das_picks['station'].map(convert_channel_index) * dx
-        )  # 4.084 = dx
-        # TODO: This should thinks again about continuity.
-        df_das_picks['y'] = df_das_picks['phase_index'].map(
-            lambda x: x * dt + hdf5_time if x * dt - first_half < 0 else x * dt
-        )  # 0.01 = dt
-
-    return df_seis_picks, df_das_picks
-
-
-def find_gamma_pick(
-    df_gamma_picks: pd.DataFrame,
-    sac_dict: dict,
-    event_total_seconds: float,
-    first_half=30,
-    dx=4.084,
-    dt=0.01,
-    hdf5_time=300,
-    station_mask=station_mask,
-):
-    """
-    Preparing the associated picks for scatter plot.
-    """
-    df_das_aso_picks = df_gamma_picks[~df_gamma_picks['station_id'].apply(station_mask)]
-    if not df_das_aso_picks.empty:
-        df_das_aso_picks['channel_index'] = df_das_aso_picks['station_id'].apply(
-            convert_channel_index
-        )
-        df_das_aso_picks['x'] = (
-            df_das_aso_picks['station_id'].apply(convert_channel_index) * dx
-        )
-        df_das_aso_picks['y'] = df_das_aso_picks['phase_index'].apply(
-            lambda x: x * dt + hdf5_time if x * dt - first_half < 0 else x * dt
-        )
-
-    df_seis_aso_picks = df_gamma_picks[df_gamma_picks['station_id'].apply(station_mask)]
-    if not df_seis_aso_picks.empty:
-        df_seis_aso_picks['total_seconds'] = df_seis_aso_picks['phase_time'].apply(
-            get_total_seconds
-        )
-        df_seis_aso_picks['x'] = (
-            df_seis_aso_picks['total_seconds'] - event_total_seconds + first_half
-        )  # Because we use -30 as start.
-        df_seis_aso_picks['y'] = df_seis_aso_picks['station_id'].map(
-            lambda x: sac_dict[x]['distance']
-        )
-
-    return df_seis_aso_picks, df_das_aso_picks
-
-
-def get_mapview(region, ax):
-    topo = (
-        pygmt.datasets.load_earth_relief(resolution='15s', region=region).to_numpy()
-        / 1e3
-    )  # km
-    x = np.linspace(region[0], region[1], topo.shape[1])
-    y = np.linspace(region[2], region[3], topo.shape[0])
-    dx, dy = 1, 1
-    xgrid, ygrid = np.meshgrid(x, y)
-    ls = LightSource(azdeg=0, altdeg=45)
-    ax.pcolormesh(
-        xgrid,
-        ygrid,
-        ls.hillshade(topo, vert_exag=10, dx=dx, dy=dy),
-        vmin=-1,
-        shading='gouraud',
-        cmap='gray',
-        alpha=1.0,
-        antialiased=True,
-        rasterized=True,
-    )
-    # cartopy setting
-    ax.coastlines()
-    ax.set_extent(region)
-
-
-def plot_map(
+# TODO: MODIFYING THE EVENT_DICT, NOT NECESSARY
+def plot_asso_map(
     station: Path,
-    event_dict: dict,
-    df_event_picks: pd.DataFrame,
-    seis_ax=None,
-    das_ax=None,
-    seis_region=None,
-    das_region=None,
+    event_dict: dict | None = None,
+    df_event_picks: pd.DataFrame | None = None,
+    main_ax: GeoAxes | None = None,  # typically seis
+    sub_ax=None,  # typically das
+    main_region: list | None = None,
+    sub_region: list | None = None,
     use_gamma=True,
     use_h3dd=False,
     station_mask=station_mask,
 ):
-    map_proj = ccrs.PlateCarree()
+    """
+    ## This is the map for plotting association.
+    """
+    # map_proj = ccrs.PlateCarree()
     # tick_proj = ccrs.PlateCarree()
-    if seis_ax is None and das_ax is None:
-        fig = plt.figure(figsize=(8, 12))
-        gs = GridSpec(2, 1, height_ratios=[3, 1])
+    # if main_ax is None and sub_ax is None:
+    #     fig = plt.figure(figsize=(8, 12))
+    # gs = GridSpec(2, 1, height_ratios=[3, 1])
     df_station = pd.read_csv(station)
     df_seis_station = df_station[df_station['station'].map(station_mask)]
     df_das_station = df_station[~df_station['station'].map(station_mask)]
     if not df_seis_station.empty:
-        if seis_ax is None:
-            seis_ax = fig.add_subplot(gs[0], projection=map_proj)
-        if seis_region is None:
-            seis_region = [
+        # get seismic station
+        if main_ax is None:
+            main_ax = fig.add_subplot(gs[0], projection=map_proj)
+        if main_region is None:
+            main_region = [
                 df_seis_station['longitude'].min() - 0.5,
                 df_seis_station['longitude'].max() + 0.5,
                 df_seis_station['latitude'].min() - 0.5,
                 df_seis_station['latitude'].max() + 0.5,
             ]
-        get_mapview(seis_region, seis_ax)
-        seis_ax.scatter(
+        get_mapview(main_region, main_ax)
+        main_ax.scatter(
             x=df_seis_station['longitude'],
             y=df_seis_station['latitude'],
             marker='^',
@@ -456,8 +82,8 @@ def plot_map(
             s=50,
             zorder=2,
         )
-        if use_gamma:
-            seis_ax.scatter(
+        if use_gamma and event_dict is not None:
+            main_ax.scatter(
                 x=event_dict['gamma']['event_lon'],
                 y=event_dict['gamma']['event_lat'],
                 marker='*',
@@ -466,8 +92,8 @@ def plot_map(
                 zorder=4,
                 label='GaMMA',
             )
-        if use_h3dd:
-            seis_ax.scatter(
+        if use_h3dd and event_dict is not None:
+            main_ax.scatter(
                 x=event_dict['h3dd']['event_lon'],
                 y=event_dict['h3dd']['event_lat'],
                 marker='*',
@@ -476,36 +102,37 @@ def plot_map(
                 zorder=4,
                 label='H3DD',
             )
-        seis_ax.legend()
-        for sta in df_event_picks[df_event_picks['station_id'].map(station_mask)][
-            'station_id'
-        ].unique():
-            seis_ax.scatter(
-                x=df_seis_station[df_seis_station['station'] == sta]['longitude'],
-                y=df_seis_station[df_seis_station['station'] == sta]['latitude'],
-                marker='^',
-                color='darkorange',
-                edgecolors='k',
-                s=50,
-                zorder=3,
-            )
-        seis_gl = seis_ax.gridlines(draw_labels=True)
+        main_ax.legend()
+        if df_event_picks is not None:
+            for sta in df_event_picks[df_event_picks['station_id'].map(station_mask)][
+                'station_id'
+            ].unique():
+                main_ax.scatter(
+                    x=df_seis_station[df_seis_station['station'] == sta]['longitude'],
+                    y=df_seis_station[df_seis_station['station'] == sta]['latitude'],
+                    marker='^',
+                    color='darkorange',
+                    edgecolors='k',
+                    s=50,
+                    zorder=3,
+                )
+        seis_gl = main_ax.gridlines(draw_labels=True)
         seis_gl.top_labels = False  # Turn off top labels
         seis_gl.right_labels = False
-        seis_ax.autoscale(tight=True)
-        seis_ax.set_aspect('auto')
+        main_ax.autoscale(tight=True)
+        main_ax.set_aspect('auto')
     if not df_das_station.empty:
-        if das_ax is None:
-            das_ax = fig.add_subplot(gs[1], projection=map_proj)
-        if das_region is None:
-            das_region = [
+        if sub_ax is None:
+            sub_ax = fig.add_subplot(gs[1], projection=map_proj)
+        if sub_region is None:
+            sub_region = [
                 df_das_station['longitude'].min() - 0.01,
                 df_das_station['longitude'].max() + 0.01,
                 df_das_station['latitude'].min() - 0.01,
                 df_das_station['latitude'].max() + 0.01,
             ]
-        get_mapview(das_region, das_ax)
-        das_ax.scatter(
+        get_mapview(sub_region, sub_ax)
+        sub_ax.scatter(
             x=df_das_station['longitude'],
             y=df_das_station['latitude'],
             marker='.',
@@ -513,8 +140,9 @@ def plot_map(
             s=5,
             zorder=2,
         )
-        if use_gamma:
-            das_ax.scatter(
+        # plot association
+        if use_gamma and event_dict is not None:
+            sub_ax.scatter(
                 x=event_dict['gamma']['event_lon'],
                 y=event_dict['gamma']['event_lat'],
                 marker='*',
@@ -523,8 +151,9 @@ def plot_map(
                 zorder=4,
                 label='GaMMA',
             )
-        if use_h3dd:
-            das_ax.scatter(
+        # plot relocation
+        if use_h3dd and event_dict is not None:
+            sub_ax.scatter(
                 x=event_dict['h3dd']['event_lon'],
                 y=event_dict['h3dd']['event_lat'],
                 marker='*',
@@ -533,19 +162,21 @@ def plot_map(
                 zorder=4,
                 label='H3DD',
             )
-        das_ax.legend()
-        for sta in df_event_picks[~df_event_picks['station_id'].map(station_mask)][
-            'station_id'
-        ].unique():
-            das_ax.scatter(
-                x=df_das_station[df_das_station['station'] == sta]['longitude'],
-                y=df_das_station[df_das_station['station'] == sta]['latitude'],
-                marker='.',
-                color='darkorange',
-                s=5,
-                zorder=3,
-            )
-        das_gl = das_ax.gridlines(draw_labels=True)
+        sub_ax.legend()
+        # plot association
+        if df_event_picks is not None:
+            for sta in df_event_picks[~df_event_picks['station_id'].map(station_mask)][
+                'station_id'
+            ].unique():
+                sub_ax.scatter(
+                    x=df_das_station[df_das_station['station'] == sta]['longitude'],
+                    y=df_das_station[df_das_station['station'] == sta]['latitude'],
+                    marker='.',
+                    color='darkorange',
+                    s=5,
+                    zorder=3,
+                )
+        das_gl = sub_ax.gridlines(draw_labels=True)
         das_gl.top_labels = False  # Turn off top labels
         das_gl.right_labels = False
         # das_ax.autoscale(tight=True)
@@ -558,6 +189,7 @@ def return_none_if_empty(df):
     return df
 
 
+# This function currently modified by Hsi-An
 def plot_asso(
     df_phasenet_picks: pd.DataFrame,
     gamma_picks: Path,
@@ -621,9 +253,8 @@ def plot_asso(
             event_time=event_dict[status]['event_time'],
             date=event_dict['gamma']['date'],
             event_point=event_dict[status]['event_point'],
-            station_list=station,
+            station=station,
             sac_parent_dir=sac_parent_dir,
-            sac_dir_name=sac_dir_name,
             amplify_index=amplify_index,
         )
         seis_map_ax = fig.add_axes([0.3, 0.5, 0.4, 0.8], projection=map_proj)
@@ -638,7 +269,11 @@ def plot_asso(
 
     if h5_parent_dir is not None:
         das_map_ax = fig.add_axes([0.3, -0.15, 0.4, 0.55], projection=map_proj)
-        das_waveform_ax = fig.add_axes([0.82, -0.15, 0.8, 0.55])
+        das_waveform_ax = fig.add_axes([0.82, -0.15, 0.8, 0.55], sharey=das_map_ax)
+        if seis_map_ax is None:
+            das_waveform_ax.set_title(
+                f"Event_{event_i}: {event_dict[status]['event_time']}, lat: {event_dict[status]['event_lat']}, lon: {event_dict[status]['event_lon']}, depth: {event_dict[status]['event_depth']} km"
+            )
     else:
         das_map_ax = None
         das_waveform_ax = None
@@ -666,16 +301,16 @@ def plot_asso(
         seis_ax=seis_waveform_ax,
     )
 
-    plot_map(
+    plot_asso_map(
         station=station,
         event_dict=event_dict,
         df_event_picks=df_event_picks,
-        seis_ax=seis_map_ax,
-        das_ax=das_map_ax,
+        main_ax=seis_map_ax,
+        sub_ax=das_map_ax,
         use_h3dd=use_h3dd,
         station_mask=station_mask,
-        seis_region=seis_region,
-        das_region=das_region,
+        main_region=seis_region,
+        sub_region=das_region,
     )
     save_name = (
         event_dict[status]['event_time']
@@ -689,3 +324,285 @@ def plot_asso(
         fig_dir / f'event_{event_i}_{save_name}.png', bbox_inches='tight', dpi=300
     )
     plt.close()
+
+
+def _add_epicenter(
+    x: float,
+    y: float,
+    ax,
+    size=10,
+    color='yellow',
+    markeredgecolor='black',
+    label='Epicenter',
+    alpha=0.5,
+):
+    """## adding epicenter."""
+    ax.plot(
+        x,
+        y,
+        '*',
+        markersize=size,
+        color=color,
+        markeredgecolor=markeredgecolor,
+        label=label,
+        alpha=alpha,
+    )
+
+
+def _add_sub_map(
+    geo_ax: GeoAxes,
+    epi_lon: float,
+    epi_lat: float,
+    epi_size=10,
+    epi_color='yellow',
+    alpha=0.5,
+):
+    """## Add sub map on the right top of the main_ax
+    Only thing needs to care about is the `geo_ax`, location is important.
+    #TODO: Using a smart way to automatically decide the location of the sub map.
+    """
+    geo_ax.coastlines(resolution='10m', color='black', linewidth=1, alpha=alpha)
+    geo_ax.add_feature(cfeature.BORDERS, linestyle=':', alpha=alpha)
+    geo_ax.add_feature(cfeature.LAND, alpha=alpha)
+
+    # epicenter
+    _add_epicenter(x=epi_lon, y=epi_lat, ax=geo_ax, size=epi_size, color=epi_color)
+
+    geo_ax.patch.set_alpha(alpha)
+    geo_ax.set_aspect('auto')
+
+
+def _add_polarity(
+    df_station, df_polarity_picks, ax, x_coord, y_coord, marker='.', markersize=5
+):
+    """## Adding polarity information on profile"""
+    df_intersection = pd.merge(df_station, df_polarity_picks, on='station', how='inner')
+    df_intersection['color'] = df_intersection['polarity'].map(polarity_color_select)
+    ax.scatter(
+        df_intersection[x_coord],
+        df_intersection[y_coord],
+        c=df_intersection['color'],
+        marker=marker,
+        s=markersize,
+    )
+
+
+def get_polarity_map(
+    geo_ax,
+    region: list,
+    df_station: pd.DataFrame,
+    df_polarity_picks: pd.DataFrame,
+    epi_lon: float,
+    epi_lat: float,
+    title='Polarity map',
+    station_mask=station_mask,
+):
+    """## The map for polarity"""
+    df_seis_station = df_station[df_station['station'].map(station_mask)]
+    df_das_station = df_station[~df_station['station'].map(station_mask)]
+    # Cartopy setting
+    get_mapview(region=region, ax=geo_ax, title=title)
+
+    # plotting station on map
+    plot_station(df_station=df_station, geo_ax=geo_ax)
+
+    # adding epicenter
+    _add_epicenter(x=epi_lon, y=epi_lat, ax=geo_ax)
+
+    # adding polarity information on it
+    _add_polarity(
+        df_station=df_seis_station,
+        df_polarity_picks=df_polarity_picks,
+        ax=geo_ax,
+        x_coord='longitude',
+        y_coord='latitude',
+        marker='^',
+        markersize=40,
+    )
+
+    _add_polarity(
+        df_station=df_das_station,
+        df_polarity_picks=df_polarity_picks,
+        ax=geo_ax,
+        x_coord='longitude',
+        y_coord='latitude',
+    )
+    geo_ax.set_xlim(region[0], region[1])
+    geo_ax.set_ylim(region[2], region[3])
+    # geo_ax.autoscale(tight=True)
+    geo_ax.set_aspect('auto')
+    geo_ax.legend(markerscale=2, labelspacing=1.2, borderpad=1, fontsize=12)
+
+
+def get_profile(
+    df_station,
+    ax,
+    df_polarity_picks: pd.DataFrame,
+    depth_lim: tuple | None = None,
+    xlim: tuple | None = None,
+    ylim: tuple | None = None,
+    depth_axis='x',
+    markersize=5,
+    grid_alpha=0.7,
+):
+    """
+    The df_polarity_picks is already filtered by the event index.
+    """
+    # ax.autoscale(tight=True)
+    if depth_lim is None:
+        depth_min = max(df_station['elevation'])
+        depth_max = min(df_station['elevation'])
+        depth_lim = (depth_min + 10, depth_max - 10)
+    # axes setting
+    # Scenario 1: depth_axis is in x cooridnate
+    if depth_axis == 'x':
+        x_coord = 'elevation'
+        y_coord = 'latitude'
+        ax.set_ylim(ylim)
+        ax.set_xlim(depth_lim)
+        ax.set_xlabel('Elevation (km)')
+        ax.tick_params(axis='y', labelleft=False)
+    elif depth_axis == 'y':
+        x_coord = 'longitude'
+        y_coord = 'elevation'
+        ax.set_xlim(xlim)
+        ax.set_ylim(depth_lim)
+        ax.invert_yaxis()
+        ax.set_ylabel('Elevation (km)')
+        ax.tick_params(axis='x', labelbottom=False)
+
+    ax.grid(True, alpha=grid_alpha)
+    ax.scatter(df_station[x_coord], df_station[y_coord], c='silver', s=markersize)
+
+    # plot station with polarity
+    _add_polarity(
+        df_station=df_station,
+        df_polarity_picks=df_polarity_picks,
+        ax=ax,
+        x_coord=x_coord,
+        y_coord=y_coord,
+        markersize=markersize,
+    )
+
+
+def get_polarity_profiles(
+    station: Path,
+    gamma_events: Path,
+    h3dd_events: Path,
+    polarity_picks: Path,
+    polarity_dout: Path,
+    focal_catalog: Path,
+    figure_dir: Path,
+    event_index: int,
+    region: list | None = None,
+    depth_lim: tuple | None = None,
+    focal_xlim=(-1.1, 1.1),
+    focal_ylim=(-1.1, 1.1),
+    focal_add_info=False,
+    focal_only_das=False,
+    savefig=True,
+):
+    """## Plot the polarity information on the station, typically for DAS.
+
+    ### TODO: Optimization index
+    This plot do not need the gamma as input, using h3dd row index to find the event.
+    Main purpose is to plot the polarity of station, and find if this event has a
+    solution of focal mechanism.
+
+    ### Usage
+    no need to think too much, just follow the hint and input your Path.
+    """
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    # data preprocessing
+    df_h3dd = find_gamma_h3dd(gamma_events, h3dd_events, event_index)
+    df_station = pd.read_csv(station)
+    if region is None:
+        region = [
+            df_station['longitude'].min(),
+            df_station['longitude'].max(),
+            df_station['latitude'].min(),
+            df_station['latitude'].max(),
+        ]
+
+    df_polarity_picks = pd.read_csv(polarity_picks)
+    df_polarity_picks = df_polarity_picks[
+        df_polarity_picks['event_index'] == event_index
+    ]
+    df_polarity_picks = df_polarity_picks.rename(columns={'station_id': 'station'})
+
+    df_gafocal, _ = check_format(focal_catalog)
+    focal_dict = find_compared_gafocal_polarity(
+        gafocal_df=df_gafocal,
+        polarity_dout=polarity_dout,
+        analyze_year='2024',
+        event_index=0,  # why this zero?
+        use_gamma=False,
+        get_waveform=False,
+    )
+
+    # The frame of plot
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(12, 14),
+        gridspec_kw={'width_ratios': [2, 1], 'height_ratios': [2, 1]},
+    )
+
+    geo_ax = fig.add_subplot(2, 2, 1, projection=ccrs.PlateCarree())
+    geo_ax1 = fig.add_subplot(4, 4, 1, projection=ccrs.PlateCarree())
+
+    # Main map
+    get_polarity_map(
+        geo_ax=geo_ax,
+        df_station=df_station,
+        df_polarity_picks=df_polarity_picks,
+        region=region,
+        title=f"{focal_dict['utc_time']}\nLat: {focal_dict['latitude']}, Lon: {focal_dict['longitude']}, Depth: {focal_dict['depth']}",
+        epi_lon=df_h3dd['longitude'].iloc[0],
+        epi_lat=df_h3dd['latitude'].iloc[0],
+    )
+
+    # Adding sub map top left
+    _add_sub_map(
+        geo_ax1,
+        epi_lon=df_h3dd['longitude'].iloc[0],
+        epi_lat=df_h3dd['latitude'].iloc[0],
+    )  # 121.58, 23.86)
+    plot_station(df_station, geo_ax1)
+
+    xlim = geo_ax.get_xlim()
+    ylim = geo_ax.get_ylim()
+
+    get_profile(
+        df_station=df_station,
+        ax=axes[0, 1],
+        df_polarity_picks=df_polarity_picks,
+        ylim=ylim,
+        depth_axis='x',
+        depth_lim=depth_lim,
+    )
+
+    get_profile(
+        df_station=df_station,
+        ax=axes[1, 0],
+        df_polarity_picks=df_polarity_picks,
+        xlim=xlim,
+        depth_axis='y',
+        depth_lim=depth_lim,
+    )
+
+    get_das_beach(
+        focal_dict=focal_dict,
+        ax=axes[1, 1],
+        xlim=focal_xlim,
+        ylim=focal_ylim,
+        only_das=focal_only_das,
+        add_info=focal_add_info,
+    )
+    axes[0, 0].axis('off')
+
+    # plt.tight_layout()
+    if savefig:
+        plt.savefig(
+            figure_dir / 'pol_map.png', dpi=300, bbox_inches='tight'
+        )  # using fig.savefig when we have several figs.

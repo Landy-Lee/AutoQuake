@@ -285,7 +285,7 @@ def run_parallel_predict(
         #         shared_list.extend(result)
 
         # Use a process pool to parallelize the work
-        with mp.Pool(processes=2) as pool:
+        with mp.Pool(processes=10) as pool:
             # results = []
             for event_index in event_indices:
                 pool.apply_async(
@@ -314,18 +314,14 @@ def run_parallel_predict(
 
 
 if __name__ == '__main__':
-    gamma_events = Path(
-        '/data2/patrick/Hualien0403/GaMMA/gamma_test/synthetic_main_eq/gamma_events.csv'
-    )
-    gamma_picks = Path(
-        '/data2/patrick/Hualien0403/GaMMA/gamma_test/synthetic_main_eq/gamma_picks.csv'
-    )
+    gamma_events = Path('/home/patrick/Work/AutoQuake/testset_1029/gamma_events.csv')
+    gamma_picks = Path('/home/patrick/Work/AutoQuake/testset_1029/gamma_picks.csv')
     sac_parent_dir = Path('/data2/patrick/Hualien0403/Dataset/')  # merging sac data
     model_path = Path(
         '/home/patrick/Work/AutoQuake_Focal_pamicoding/DiTing-FOCALFLOW/models/DiTingMotionJul.onnx'
     )  # polarity model
-    hdf5_parent_dir = Path('/raid4/DAS_data/iDAS_MiDAS/hdf5/20240402_hdf5')
-    output_dir = Path('/data2/patrick/Hualien0403/GaMMA/gamma_test/synthetic_main_eq/')
+    # hdf5_parent_dir = Path('/raid4/DAS_data/iDAS_MiDAS/hdf5/20240402_hdf5')
+    output_dir = Path('/home/patrick/Work/AutoQuake/test')
 
     df_counter = pd.read_csv(gamma_events)
     event_indices = set(
@@ -342,7 +338,6 @@ if __name__ == '__main__':
     run_parallel_predict(
         event_indices=event_indices,
         gamma_picks=gamma_picks,
-        hdf5_parent_dir=hdf5_parent_dir,
         sac_parent_dir=sac_parent_dir,
         model_path=model_path,
         output_dir=output_dir,
