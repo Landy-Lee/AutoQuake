@@ -31,6 +31,7 @@ from .EQNet.eqnet.utils import (
 )
 
 # mp.set_start_method("spawn", force=True)
+log_dir = Path(__file__).parents[1].resolve() / 'log'
 matplotlib.use('agg')
 logger = logging.getLogger()
 
@@ -187,8 +188,9 @@ class PhaseNet:
         for i in range(delta.days + 1):
             date = start_date + timedelta(days=i)
             date_list.append(date.strftime('%Y%m%d'))
-        available_date = os.listdir(str(self.data_parent_dir))
-        date_list = [date for date in date_list if date in available_date]
+        if self.model != 'phasenet_das':
+            available_date = os.listdir(str(self.data_parent_dir))
+            date_list = [date for date in date_list if date in available_date]
 
         if len(date_list) == 1:
             self.dir_name = date_list[0]
@@ -205,7 +207,10 @@ class PhaseNet:
         self.args_list = []
         self.date_list = self.date_range()
         for date in self.date_list:
-            data_path = self.data_parent_dir / date
+            if self.model == 'phasenet_das':
+                data_path = self.data_parent_dir / f'{date}_hdf5'
+            else:
+                data_path = self.data_parent_dir / date
             args = argparse.Namespace(
                 data_path=str(data_path),
                 data_list=self._check_data_list(self.data_list, data_path),
@@ -266,7 +271,8 @@ class PhaseNet:
             pass
         return data_list
 
-    def concat_picks(self):
+    @staticmethod
+    def concat_picks(date_list: list, result_path: Path, model: str, dir_name: str):
         """## Concatenate daily picks to a single csv file.
 
         There exists 2 scenario:
@@ -275,18 +281,22 @@ class PhaseNet:
 
         """
         concat_list = []
-        for date in self.date_list:
+        for date in date_list:
             # TODO: What about DAS data?
-            picks_path = self.result_path / f'picks_{self.model}'
-            if self.model == 'phasenet':
+            picks_path = result_path / f'picks_{model}'
+            if model == 'phasenet':
                 df = pd.read_csv(
                     picks_path / f'{date}.csv'
                 )  # because phasenet automatic combined the daily picks outside the dir.
                 concat_list.append(df)
-            elif self.model == 'phasenet_das':
+            elif model == 'phasenet_das':
                 csv_list = list((picks_path / date).glob('*.csv'))
                 for csv_ in csv_list:
-                    df = pd.read_csv(csv_)
+                    try:
+                        df = pd.read_csv(csv_)
+                    except pd.errors.EmptyDataError:
+                        logging.warning(f'{csv_} is empty, skipping...')
+                        continue
                     # Converting the channel_index into a string-like station name.
                     df['station_id'] = df['channel_index'].astype(str).str.zfill(4)
                     df['station_id'] = df['station_id'].apply(
@@ -295,12 +305,38 @@ class PhaseNet:
                     concat_list.append(df)
 
         result = pd.concat(concat_list)
-        date_dir = self.result_path / f'picks_{self.model}' / self.dir_name
+        date_dir = result_path / f'picks_{model}' / dir_name
         date_dir.mkdir(parents=True, exist_ok=True)
         result.to_csv(
             date_dir / 'picks.csv',
             index=False,
         )
+
+    @staticmethod
+    def picking_filter(picks: Path, filt_station: Path, output_dir: Path | None = None):
+        """## filtering the picks through station list"""
+        df_sta = pd.read_csv(filt_station)
+        filt_sta_list = df_sta['station'].tolist()
+        df_picks = pd.read_csv(picks)
+        df_picks = df_picks[df_picks['station_id'].isin(filt_sta_list)]
+        if output_dir is None:
+            output_dir = picks.parent
+        df_picks.to_csv(output_dir / 'filt_picks.csv', index=False)
+
+    @staticmethod
+    def picks_check(
+        picks: Path,
+        station: Path,
+        get_station=lambda x: x.split('.')[1],
+        output_dir=None,
+    ):
+        df_picks = pd.read_csv(picks)
+        df_sta = pd.read_csv(station)
+        df_picks['station_id'] = df_picks['station_id'].map(get_station)
+        df_picks = df_picks[df_picks['station_id'].isin(df_sta['station'])]
+        if output_dir is None:
+            output_dir = picks.parent
+        df_picks.to_csv(output_dir / 'check_picks.csv', index=False)
 
     def postprocess(self, meta, output, polarity_scale=1, event_scale=16):
         nt, nx = meta['nt'], meta['nx']
@@ -826,7 +862,18 @@ class PhaseNet:
         # return os.path.join(pick_path, 'picks.csv')
 
     def run_predict(self, processes=3):
+        logging.basicConfig(
+            filename=log_dir / 'phasenet.log',
+            filemode='w',
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        )
         """## Main function to run."""
         with multiprocessing.Pool(processes=processes) as pool:
             pool.map(self.predict, self.args_list)
-        self.concat_picks()
+        self.concat_picks(
+            date_list=self.date_list,
+            result_path=self.result_path,
+            model=self.model,
+            dir_name=self.dir_name,
+        )
