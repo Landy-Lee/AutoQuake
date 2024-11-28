@@ -3,15 +3,17 @@
 /test_format
 /test/seis
 /test/das
+/test_agu
 # output and some text
 *.png
 gmt.history
 *.log
 *.csv
 *.dout
+*.hout
 *.P24
 *.ps
-
+*gamma_config.txt
 
 
 # model
