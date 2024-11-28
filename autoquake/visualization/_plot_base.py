@@ -1,6 +1,6 @@
 import calendar
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import h5py
@@ -10,6 +10,7 @@ import pandas as pd
 import pygmt
 from cartopy.mpl.geoaxes import GeoAxes
 from geopy.distance import geodesic
+from matplotlib.axes import Axes
 from matplotlib.colors import LightSource
 from matplotlib.gridspec import GridSpec
 from matplotlib.ticker import MultipleLocator
@@ -19,6 +20,27 @@ from pyrocko.plot import beachball, mpl_color
 
 
 # ===== Sauce =====
+def add_on_utc_time(time: str, delta: float) -> str:
+    """
+    Adjusts a UTC time string by adding or subtracting a number of seconds.
+
+    Args:
+        utc_time_str (str): The UTC time as a string in ISO format (e.g., "2024-04-02T00:02:02.190").
+        delta_seconds (int): The number of seconds to add (positive) or subtract (negative).
+
+    Returns:
+        str: The adjusted UTC time in the same format.
+    """
+    # Parse the string into a datetime object
+    utc_time = datetime.strptime(time, '%Y-%m-%dT%H:%M:%S.%f')
+
+    # Add or subtract the time delta
+    adjusted_time = utc_time + timedelta(seconds=delta)
+
+    # Convert it back to the original string format
+    return adjusted_time.strftime('%Y-%m-%dT%H:%M:%S.%f')
+
+
 def polarity_color_select(polarity: str):
     if polarity == 'x':
         return 'k'
@@ -47,6 +69,11 @@ def get_total_seconds(dt: pd.Timestamp | str) -> float:
 
 def utc_to_timestamp(utc_string: str):
     """Converts an ISO format string to a Unix timestamp."""
+    # Ensure microseconds are correctly padded
+    if '.' in utc_string:
+        date_part, fractional_part = utc_string.split('.')
+        fractional_part = fractional_part.ljust(6, '0')  # Pad to 6 digits
+        utc_string = f'{date_part}.{fractional_part}'
     return datetime.fromisoformat(utc_string).timestamp()
 
 
@@ -226,9 +253,9 @@ def _merge_latest(data_path: Path, sta_name: str):
     """
     sac_list = list(data_path.glob(f'*{sta_name}*Z*'))
     if not sac_list:
-        logging.info(f'{sta_name} using other component')
+        # logging.info(f'{sta_name} using other component')
         sac_list = list(data_path.glob(f'*{sta_name}*'))
-        logging.info(f'comp_list: {sac_list}')
+        # logging.info(f'comp_list: {sac_list}')
     stream = Stream()
     for sac_file in sac_list:
         st = read(sac_file)
@@ -282,7 +309,31 @@ def check_format(catalog, i=None):
     return df, timestamp
 
 
+def catalog_filter(
+    catalog_df: pd.DataFrame, catalog_range: dict[str, float] | None = None
+) -> pd.DataFrame:
+    if catalog_range is not None:
+        catalog_df = catalog_df[
+            (catalog_df['longitude'] > catalog_range['min_lon'])
+            & (catalog_df['longitude'] < catalog_range['max_lon'])
+            & (catalog_df['latitude'] > catalog_range['min_lat'])
+            & (catalog_df['latitude'] < catalog_range['max_lat'])
+            & (catalog_df['depth_km'] > catalog_range['min_depth'])
+            & (catalog_df['depth_km'] < catalog_range['max_depth'])
+        ]
+    return catalog_df
+
+
 # ===== preprocess function =====
+
+
+def _process_midas_scenario(time_str: str, interval=300):
+    datetime = pd.to_datetime(time_str)
+    ymd = f'{datetime.year}{datetime.month:>02}{datetime.day:>02}'
+    total_seconds = get_total_seconds(datetime)
+    hdf5_index = int(total_seconds // interval)
+    sec = total_seconds % interval
+    return ymd, hdf5_index, sec
 
 
 def preprocess_gamma_csv(
@@ -367,8 +418,10 @@ def preprocess_gamma_csv(
 
 def _preprocess_phasenet_csv(
     phasenet_picks: Path, get_station=lambda x: str(x).split('.')[1]
-):
-    """## Preprocess the phasenet_csv"""
+) -> pd.DataFrame:
+    """## Preprocess the phasenet_csv
+    Using get_station to retrieve the station name in station_id column.
+    """
     df_all_picks = pd.read_csv(phasenet_picks)
     df_all_picks['phase_time'] = pd.to_datetime(df_all_picks['phase_time'])
     df_all_picks['total_seconds'] = df_all_picks['phase_time'].apply(get_total_seconds)
@@ -563,9 +616,14 @@ def find_sac_data(
         # glob the waveform
 
         st = _merge_latest(data_path=sac_path, sta_name=sta)
+        print(st)
         st.taper(type='hann', max_percentage=0.05)
         st.filter('bandpass', freqmin=1, freqmax=10)
-        st[0].trim(starttime=starttime_trim, endtime=endtime_trim)
+        try:
+            st[0].trim(starttime=starttime_trim, endtime=endtime_trim)
+        except Exception as e:
+            print(e)
+            continue
         sampling_rate = 1 / st[0].stats.sampling_rate
         time_sac = np.arange(
             0, 90 + sampling_rate, sampling_rate
@@ -574,8 +632,8 @@ def find_sac_data(
         try:
             data_sac_raw = st[0].data / max(st[0].data)  # normalize the amplitude.
         except Exception as e:
-            logging.info(f'Error: {e}')
-            logging.info(f'check the length of given time: {len(st[0].data)}')
+            logging.info(f'Error: {e} at {sta}')
+            logging.info(f'check the {sta} length of given time: {len(st[0].data)}')
             continue
 
         sta_point = (
@@ -593,13 +651,19 @@ def find_sac_data(
                 constant_values=np.nan,
             )  # adding the Nan to ensure the data length as same as time window.
         else:
-            data_sac = np.pad(
-                data_sac_raw,
-                (0, x_len - len(data_sac_raw)),
-                mode='constant',
-                constant_values=np.nan,
-            )  # adding the Nan to ensure the data length as same as time window.
-
+            try:
+                data_sac = np.pad(
+                    data_sac_raw,
+                    (0, x_len - len(data_sac_raw)),
+                    mode='constant',
+                    constant_values=np.nan,
+                )  # adding the Nan to ensure the data length as same as time window.
+            except Exception as e:
+                logging.error(
+                    f'Padding value: {x_len} (x_len) - {len(data_sac_raw)} (data_sac_raw)'
+                )
+                logging.error(f'Error: {e} during concat in {sta}')
+                continue  # TODO: Check is it suitalbe? I think existing this exception is weird.
         sac_dict[str(sta)] = {
             'time': time_sac,
             'sac_data': data_sac,
@@ -648,12 +712,10 @@ def find_gamma_pick(
     return df_seis_aso_picks, df_das_aso_picks
 
 
-def find_phasenet_pick(
-    event_total_seconds: float,
-    sac_dict: dict,
-    df_all_picks: pd.DataFrame,  # why this place using dataframe? because we don't want to read it several time.
-    first_half=30,
-    second_half=60,
+def _find_phasenet_das_pick(
+    starttime: str,
+    endtime: str,
+    df_picks: pd.DataFrame,  # why this place using dataframe? because we don't want to read it several time.
     dx=4.084,
     dt=0.01,
     das_time_interval=300,
@@ -662,34 +724,55 @@ def find_phasenet_pick(
     """
     Filtering waveform in specific time window and convert it for scatter plot.
     """
-    time_window_start = event_total_seconds - first_half
-    time_window_end = event_total_seconds + second_half
-    pick_time = df_all_picks['total_seconds'].to_numpy()
-    df_event_picks = df_all_picks[
-        (pick_time >= time_window_start) & (pick_time <= time_window_end)
+    df_picks = df_picks[
+        (df_picks['phase_time'] >= pd.Timestamp(starttime))
+        & (df_picks['phase_time'] <= pd.Timestamp(endtime))
     ]
+    _, _, start_sec = _process_midas_scenario(starttime, interval=das_time_interval)
 
-    df_seis_picks = df_event_picks[df_event_picks['station'].map(station_mask)]
-    if not df_seis_picks.empty:
-        df_seis_picks['x'] = (
-            df_seis_picks['total_seconds'] - event_total_seconds + first_half
-        )  # Because we use -30 as start.
+    df_das_picks = df_picks[~df_picks['station'].map(station_mask)]
+    # df_das_picks['channel_index'] = df_das_picks['station'].map(
+    #     convert_channel_index
+    # )
+    df_das_picks['x'] = df_das_picks['station'].map(convert_channel_index) * dx
+    df_das_picks['y'] = df_das_picks['phase_index'].map(
+        lambda x: x * dt + das_time_interval if x * dt - start_sec < 0 else x * dt
+    )  # 0.01 = dt
+
+    return df_das_picks
+
+
+def _find_phasenet_seis_pick(
+    starttime: str,
+    endtime: str,
+    df_picks: pd.DataFrame,  # why this place using dataframe? because we don't want to read it several time.
+    sac_dict={},
+    picking_check=True,
+    asso_check=False,
+    station_mask=station_mask,
+):
+    """
+    Filtering waveform in specific time window and convert it for scatter plot.
+    """
+    df_picks = df_picks[
+        (df_picks['phase_time'] >= pd.Timestamp(starttime))
+        & (df_picks['phase_time'] <= pd.Timestamp(endtime))
+    ]
+    start_datetime = pd.to_datetime(starttime)
+    start_total_seconds = get_total_seconds(start_datetime)
+
+    df_seis_picks = df_picks[df_picks['station'].map(station_mask)]
+    df_seis_picks['x'] = (
+        df_seis_picks['total_seconds'] - start_total_seconds
+    )  # Because we use -30 as start.
+    if picking_check:
+        df_seis_picks['y'] = 0.0
+    elif asso_check:
         df_seis_picks['y'] = df_seis_picks['station'].map(
             lambda x: sac_dict[x]['distance']
         )
 
-    df_das_picks = df_event_picks[~df_event_picks['station'].map(station_mask)]
-    if not df_das_picks.empty:
-        df_das_picks['channel_index'] = df_das_picks['station'].map(
-            convert_channel_index
-        )
-        df_das_picks['x'] = df_das_picks['station'].map(convert_channel_index) * dx
-        # TODO: This should thinks again about continuity.
-        df_das_picks['y'] = df_das_picks['phase_index'].map(
-            lambda x: x * dt + das_time_interval if x * dt - first_half < 0 else x * dt
-        )  # 0.01 = dt
-
-    return df_seis_picks, df_das_picks
+    return df_seis_picks
 
 
 # ===== Plot private function =====
@@ -791,6 +874,145 @@ def _plot_seis(
 
 
 # ===== add function =====
+def _add_das_picks(
+    starttime: str,  # event_total_seconds - 30
+    endtime: str,  # event_total_seconds + 60
+    main_ax: Axes,
+    h5_parent_dir: Path,  # h5_parent_dir/ymd/300_600.h5
+    prob_ax: Axes | None = None,
+    df_das_gamma_picks: pd.DataFrame | None = None,
+    df_phasenet_picks: pd.DataFrame | None = None,
+    interval=300,
+):
+    """
+    We only consider the scale across the day.
+    """
+    start_ymd, start_idx, start_sec = _process_midas_scenario(
+        starttime, interval=interval
+    )
+    end_ymd, end_idx, end_sec = _process_midas_scenario(endtime, interval=interval)
+    window = [f'{start_ymd}:{interval*start_idx}_{interval*(start_idx+1)}.h5']
+    same_index = True
+    if start_idx != end_idx:
+        # same day
+        next_window = f'{end_ymd}:{interval*(end_idx)}_{interval*(end_idx+1)}.h5'
+        window.append(next_window)
+        same_index = False
+    try:
+        all_data = []
+        for win in window:
+            ymd = win.split(':')[0]
+            index_file_name = win.split(':')[1]
+            file = list((h5_parent_dir / f'{ymd}_hdf5').glob(f'*{index_file_name}'))[0]
+            if not file:
+                raise IndexError(f'File not found for window {win}')
+            try:
+                with h5py.File(file, 'r') as fp:
+                    ds = fp['data']
+                    data = ds[...]  # np.array
+                    dt = ds.attrs['dt_s']  # 0.01 sampling rate
+                    dx = ds.attrs['dx_m']  # interval of cable ~ 4
+                    nx, nt = data.shape
+                    logging.info(data.shape)
+                    x = np.arange(nx) * dx
+                    t = np.arange(nt) * dt
+                    all_data.append(data)
+            except Exception as e:
+                logging.info(f'Error reading {file}: {e}')
+    except IndexError:
+        logging.info(f'File not found for window {window}')
+
+    # Handle the case where there is only one array in all_data
+    if len(all_data) == 1:
+        concatenated_data = all_data[0]
+        # logging.info('Only one data array, no need to concatenate.')
+    elif len(all_data) > 1:
+        # Concatenate all data arrays along the second axis (horizontally)
+        concatenated_data = np.concatenate(all_data, axis=1)
+        # logging.info(f'Concatenated data shape: {concatenated_data.shape}')
+    nx, nt = concatenated_data.shape
+    x = np.arange(nx) * dx
+    t = np.arange(nt) * dt
+
+    main_ax.imshow(
+        normalize(concatenated_data).T,
+        cmap='seismic',
+        vmin=-1,
+        vmax=1,
+        aspect='auto',
+        extent=[x[0], x[-1], t[-1], t[0]],
+        interpolation='none',
+    )
+
+    if not same_index:
+        main_ax.set_ylim(
+            interval + end_sec, start_sec
+        )  # concat later or not would not influence the time.
+    else:
+        main_ax.set_ylim(end_sec, start_sec)
+    if df_phasenet_picks is not None:
+        df_phasenet_picks = _find_phasenet_das_pick(
+            starttime=starttime, endtime=endtime, df_picks=df_phasenet_picks
+        )
+        main_ax.scatter(
+            df_phasenet_picks[df_phasenet_picks['phase_type'] == 'P']['x'],
+            df_phasenet_picks[df_phasenet_picks['phase_type'] == 'P']['y'],
+            c='r',
+            s=1,
+            alpha=0.05,
+            zorder=2,
+        )
+        main_ax.scatter(
+            df_phasenet_picks[df_phasenet_picks['phase_type'] == 'S']['x'],
+            df_phasenet_picks[df_phasenet_picks['phase_type'] == 'S']['y'],
+            c='c',
+            s=1,
+            alpha=0.05,
+            zorder=2,
+        )
+        if prob_ax is not None:
+            prob_ax.scatter(
+                df_phasenet_picks[df_phasenet_picks['phase_type'] == 'P'][
+                    'phase_score'
+                ],
+                df_phasenet_picks[df_phasenet_picks['phase_type'] == 'P']['y'],
+                c='r',
+                s=1,
+            )
+            prob_ax.scatter(
+                df_phasenet_picks[df_phasenet_picks['phase_type'] == 'S'][
+                    'phase_score'
+                ],
+                df_phasenet_picks[df_phasenet_picks['phase_type'] == 'S']['y'],
+                c='c',
+                s=0.6,
+            )
+            prob_ax.yaxis.set_ticks([])
+            prob_ax.set_yticklabels([])
+            prob_ax.set_xlabel('Prob')
+    if df_das_gamma_picks is not None:
+        main_ax.scatter(
+            df_das_gamma_picks[df_das_gamma_picks['phase_type'] == 'P']['x'],
+            df_das_gamma_picks[df_das_gamma_picks['phase_type'] == 'P']['y'],
+            c='r',
+            edgecolors='black',
+            s=1,
+            zorder=4,
+        )
+        main_ax.scatter(
+            df_das_gamma_picks[df_das_gamma_picks['phase_type'] == 'S']['x'],
+            df_das_gamma_picks[df_das_gamma_picks['phase_type'] == 'S']['y'],
+            c='c',
+            edgecolors='black',
+            s=1,
+            zorder=4,
+        )
+
+    main_ax.scatter([], [], c='r', label='P')
+    main_ax.scatter([], [], c='c', label='S')
+    main_ax.legend()
+    main_ax.set_xlabel('Distance (m)')
+    main_ax.set_ylabel('Time (s)')
 
 
 # ===== get function =====
@@ -822,151 +1044,81 @@ def get_mapview(region: list, ax: GeoAxes, title='Map'):
     # cartopy setting
     ax.coastlines()
     ax.set_extent(region)
-    ax.set_title(title, fontsize=20)
+    ax.set_title(title, fontsize=15)
     gl = ax.gridlines(draw_labels=True)
     gl.top_labels = False  # Turn off top labels
     gl.right_labels = False
 
 
+def get_phasenet_das(
+    picks: Path,
+    hdf5_parent_dir: Path,
+    event_utc_time: str | None = None,
+    starttime: str | None = None,
+    endtime: str | None = None,
+    main_ax: Axes | None = None,
+    prob_ax: Axes | None = None,
+    plot_prob=True,
+    get_station=lambda x: x,
+):
+    """## Get PhaseNet DAS result.
+    If you have no idea how to determine the start and end time, you can give an
+    event_utc_time to let add_on_utc_time function to determine the start and end.
+
+    ### About axes
+    scenario1: using the default axes
+    scenario2: providing your own axes
+        - 2a. only plot main
+        - 2b. plot main and prob axes
+    """
+    df_phasenet = _preprocess_phasenet_csv(
+        phasenet_picks=picks, get_station=get_station
+    )
+    if event_utc_time is not None:
+        starttime = add_on_utc_time(event_utc_time, -30)
+        endtime = add_on_utc_time(event_utc_time, 60)
+
+    if starttime is not None and endtime is not None:
+        # axes judge
+        if plot_prob:
+            if main_ax is None and prob_ax is None:
+                fig = plt.figure()
+                gs = GridSpec(1, 3, figure=fig)
+                main_ax = fig.add_subplot(gs[0, :2])
+                prob_ax = fig.add_subplot(gs[0, 2])
+            else:
+                raise ValueError(
+                    'If you want to plot prob, please provide both Axes or both None'
+                )
+        else:
+            if main_ax is None:
+                fig, main_ax = plt.subplots()
+                prob_ax = None
+
+        _add_das_picks(
+            starttime=starttime,
+            endtime=endtime,
+            main_ax=main_ax,
+            prob_ax=prob_ax,
+            h5_parent_dir=hdf5_parent_dir,
+            df_phasenet_picks=df_phasenet,
+        )
+    else:
+        raise ValueError(
+            'Please specify the starttime and endtime!, or input the event_utc_time'
+        )
+
+
 # ===== run function =====
 # ===== plot function =====
-def _plot_das(
-    event_total_seconds: float,
-    interval: int,
-    ax,
-    h5_parent_dir: Path,
-    df_das_gamma_picks: pd.DataFrame,
-    df_das_phasenet_picks: pd.DataFrame,
-):
-    index = int(event_total_seconds // interval)
-    window = [f'{interval*index}_{interval*(index+1)}.h5']
-    time_index = round(event_total_seconds % interval, 3)
-    get_previous = False
-    if time_index - 30 < 0 and index != 0:
-        previous_window = f'{interval*(index-1)}_{interval*index}.h5'
-        window.insert(0, previous_window)
-        get_previous = True
-    if time_index + 60 > interval and index != 287:
-        next_window = f'{interval*(index+1)}_{interval*(index+2)}.h5'
-        window.append(next_window)
-
-    try:
-        all_data = []
-        for win in window:
-            file = list(h5_parent_dir.glob(f'*{win}'))[0]
-            if not file:
-                raise IndexError(f'File not found for window {win}')
-            try:
-                with h5py.File(file, 'r') as fp:
-                    ds = fp['data']
-                    data = ds[...]  # np.array
-                    dt = ds.attrs['dt_s']  # 0.01 sampling rate
-                    dx = ds.attrs['dx_m']  # interval of cable ~ 4
-                    nx, nt = data.shape
-                    logging.info(data.shape)
-                    x = np.arange(nx) * dx
-                    t = np.arange(nt) * dt
-                    all_data.append(data)
-            except Exception as e:
-                logging.info(f'Error reading {file}: {e}')
-    except IndexError:
-        logging.info(f'File not found for window {window}')
-
-    # Handle the case where there is only one array in all_data
-    if len(all_data) == 1:
-        concatenated_data = all_data[0]
-        logging.info('Only one data array, no need to concatenate.')
-    elif len(all_data) > 1:
-        # Concatenate all data arrays along the second axis (horizontally)
-        concatenated_data = np.concatenate(all_data, axis=1)
-        logging.info(f'Concatenated data shape: {concatenated_data.shape}')
-    nx, nt = concatenated_data.shape
-    x = np.arange(nx) * dx
-    t = np.arange(nt) * dt
-
-    ax.imshow(
-        normalize(concatenated_data).T,
-        cmap='seismic',
-        vmin=-1,
-        vmax=1,
-        aspect='auto',
-        extent=[x[0], x[-1], t[-1], t[0]],
-        interpolation='none',
-    )
-    if get_previous:
-        ax.set_ylim(
-            time_index + 60 + interval, time_index - 30 + interval
-        )  # because the concat, origin time should add interval.
-    else:
-        ax.set_ylim(
-            time_index + 60, time_index - 30
-        )  # concat later or not would not influence the time.
-    ax.scatter(
-        df_das_phasenet_picks[df_das_phasenet_picks['phase_type'] == 'P'][
-            'channel_index'
-        ].values
-        * dx,
-        df_das_phasenet_picks[df_das_phasenet_picks['phase_type'] == 'P'][
-            'phase_index'
-        ].values
-        * dt,
-        c='r',
-        s=1,
-        alpha=0.05,
-    )
-    ax.scatter(
-        df_das_gamma_picks[df_das_gamma_picks['phase_type'] == 'P'][
-            'channel_index'
-        ].values
-        * dx,
-        df_das_gamma_picks[df_das_gamma_picks['phase_type'] == 'P'][
-            'phase_index'
-        ].values
-        * dt,
-        c='r',
-        s=1,
-        alpha=0.3,
-    )
-    ax.scatter(
-        df_das_phasenet_picks[df_das_phasenet_picks['phase_type'] == 'S'][
-            'channel_index'
-        ].values
-        * dx,
-        df_das_phasenet_picks[df_das_phasenet_picks['phase_type'] == 'S'][
-            'phase_index'
-        ].values
-        * dt,
-        c='c',
-        s=1,
-        alpha=0.05,
-    )
-    ax.scatter(
-        df_das_gamma_picks[df_das_gamma_picks['phase_type'] == 'S'][
-            'channel_index'
-        ].values
-        * dx,
-        df_das_gamma_picks[df_das_gamma_picks['phase_type'] == 'S'][
-            'phase_index'
-        ].values
-        * dt,
-        c='c',
-        s=1,
-        alpha=0.3,
-    )
-    ax.scatter([], [], c='r', label='P')
-    ax.scatter([], [], c='c', label='S')
-    ax.legend()
-    ax.set_xlabel('Distance (m)')
-    ax.set_ylabel('Time (s)')
-
-
 def plot_waveform_check(
     sac_dict: dict,
+    starttime: str,
+    end_time: str,
     df_seis_phasenet_picks: pd.DataFrame | None = None,
     df_seis_gamma_picks: pd.DataFrame | None = None,
     df_das_phasenet_picks: pd.DataFrame | None = None,
     df_das_gamma_picks: pd.DataFrame | None = None,
-    event_total_seconds=None,
     h5_parent_dir=None,
     das_ax=None,
     seis_ax=None,
@@ -988,20 +1140,27 @@ def plot_waveform_check(
     if (
         df_das_gamma_picks is not None
         and df_das_phasenet_picks is not None
-        and event_total_seconds is not None
         and h5_parent_dir is not None
     ):
-        _plot_das(
-            event_total_seconds=event_total_seconds,
+        _add_das_picks(
+            starttime=starttime,
+            endtime=end_time,
             interval=interval,
-            ax=das_ax,
+            main_ax=das_ax,
             h5_parent_dir=h5_parent_dir,
             df_das_gamma_picks=df_das_gamma_picks,
-            df_das_phasenet_picks=df_das_phasenet_picks,
+            df_phasenet_picks=df_das_phasenet_picks,
         )
 
 
-def plot_station(df_station: pd.DataFrame, geo_ax):
+def plot_station(
+    df_station: pd.DataFrame,
+    geo_ax,
+    color=None,
+    plot_station_name=False,
+    fontsize=10,
+    text_dist=0.01,
+):
     """
     plot the station distribution on map.
     """
@@ -1012,7 +1171,7 @@ def plot_station(df_station: pd.DataFrame, geo_ax):
             df_station[mask_digit]['longitude'],
             df_station[mask_digit]['latitude'],
             s=5,
-            c='k',
+            c='k' if color is None else color,
             marker='.',
             alpha=0.5,
             rasterized=True,
@@ -1029,6 +1188,19 @@ def plot_station(df_station: pd.DataFrame, geo_ax):
             rasterized=True,
             label='Seismometer',
         )
+        if plot_station_name:
+            for x, y, s in zip(
+                df_station[mask_alpha]['longitude'],
+                df_station[mask_alpha]['latitude'],
+                df_station[mask_alpha]['station'],
+            ):
+                geo_ax.text(
+                    x=x + text_dist,
+                    y=y + text_dist,
+                    s=s,
+                    fontsize=fontsize,
+                    clip_on=True,
+                )
 
 
 def get_das_beach(

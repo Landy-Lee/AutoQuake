@@ -29,6 +29,10 @@ def run_autoquake(
     mag_processes=30,
     use_focal=True,
     type_judge=None,
+    station_file: Path | None = None,
+    result_dir: Path | None = None,
+    sac_parent_dir: Path | None = None,
+    h5_parent_dir: Path | None = None,
 ):
     """## Run autoquake pipeline.
 

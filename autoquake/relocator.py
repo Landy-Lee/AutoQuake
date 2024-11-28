@@ -168,28 +168,31 @@ class H3DD:
     def _gamma_preprocess(
         self, df_event: pd.DataFrame, df_picks: pd.DataFrame
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        df_event['time'] = pd.to_datetime(df_event['time'])
-        df_event['ymd'] = df_event['time'].dt.strftime('%Y%m%d')
-        df_event['hour'] = df_event['time'].dt.hour
-        df_event['minute'] = df_event['time'].dt.minute
+        df_event['time'] = pd.to_datetime(df_event.loc[:, 'time'])
+        df_event['ymd'] = df_event.loc[:, 'time'].dt.strftime('%Y%m%d')
+        df_event['hour'] = df_event.loc[:, 'time'].dt.hour
+        df_event['minute'] = df_event.loc[:, 'time'].dt.minute
         df_event['seconds'] = (
-            df_event['time'].dt.second + df_event['time'].dt.microsecond / 1_000_000
+            df_event.loc[:, 'time'].dt.second
+            + df_event.loc[:, 'time'].dt.microsecond / 1_000_000
         )
-        df_event['lon_int'] = df_event['longitude'].apply(lambda x: int(x))
+        df_event['lon_int'] = df_event.loc[:, 'longitude'].apply(lambda x: int(x))
         df_event['lon_deg'] = (
-            df_event['longitude'].apply(lambda x: float(x)) - df_event['lon_int']
+            df_event.loc[:, 'longitude'].apply(lambda x: float(x))
+            - df_event.loc[:, 'lon_int']
         ) * 60
-        df_event['lat_int'] = df_event['latitude'].apply(lambda x: int(x))
+        df_event['lat_int'] = df_event.loc[:, 'latitude'].apply(lambda x: int(x))
         df_event['lat_deg'] = (
-            df_event['latitude'].apply(lambda x: float(x)) - df_event['lat_int']
+            df_event.loc[:, 'latitude'].apply(lambda x: float(x))
+            - df_event.loc[:, 'lat_int']
         ) * 60
-        df_event['depth'] = df_event['depth_km'].round(2)
+        df_event['depth'] = df_event.loc[:, 'depth_km'].round(2)
 
-        df_picks['phase_time'] = pd.to_datetime(df_picks['phase_time'])
-        df_picks['minute'] = df_picks['phase_time'].dt.minute
+        df_picks['phase_time'] = pd.to_datetime(df_picks.loc[:, 'phase_time'])
+        df_picks['minute'] = df_picks.loc[:, 'phase_time'].dt.minute
         df_picks['seconds'] = (
-            df_picks['phase_time'].dt.second
-            + df_picks['phase_time'].dt.microsecond / 1_000_000
+            df_picks.loc[:, 'phase_time'].dt.second
+            + df_picks.loc[:, 'phase_time'].dt.microsecond / 1_000_000
         )
         return df_event, df_picks
 
@@ -197,6 +200,7 @@ class H3DD:
         self, output_file: Path, df_event: pd.DataFrame, df_picks: pd.DataFrame
     ):
         event_indices = [event for event in df_event['event_index'] if event != -1]
+        print(f'event_indices: {len(event_indices)}')
         with open(output_file, 'w') as r:
             for i in event_indices:
                 row = df_event[df_event['event_index'] == i]
@@ -239,11 +243,13 @@ class H3DD:
         # Call the get_gamma method to process and save the chunk
         self.get_gamma(output_file=output_file, df_event=df_event, df_picks=df_picks)
 
-    def process_in_parallel(self, df_event, df_picks, chunk_size):
+    def process_in_parallel(
+        self, df_event: pd.DataFrame, df_picks: pd.DataFrame, chunk_size
+    ):
         """Split the DataFrame into chunks and process them in parallel."""
         # Create a list of chunks to process
         chunks = [
-            (df_event.iloc[i : i + chunk_size], file_num, df_picks)
+            (df_event.iloc[i : i + chunk_size].copy(), file_num, df_picks)
             for file_num, i in enumerate(range(0, len(df_event), chunk_size))
         ]
         self.file_num = len(chunks)
@@ -327,6 +333,9 @@ class H3DD:
         os.system(f'cp {self.dout} {self.gamma_event.parent}')
 
     def just_run(self, dat_ch: Path):
+        """
+        If the dat_ch alrady exist.
+        """
         self.config_h3dd_inp(dat_ch=dat_ch)
 
         working_dir = self.h3dd_dir
