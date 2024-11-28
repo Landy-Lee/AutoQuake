@@ -20,19 +20,21 @@ import numpy as np
 import pandas as pd
 import pygmt
 from cartopy.mpl.geoaxes import GeoAxes
+
+# from obspy.imaging.beachball import beach
+from geopy.distance import geodesic
 from matplotlib.axes import Axes
 from matplotlib.colors import LightSource
 from matplotlib.gridspec import GridSpec
 from matplotlib.ticker import MultipleLocator
 from obspy import Trace, UTCDateTime, read
 
-# from obspy.imaging.beachball import beach
-# from geopy.distance import geodesic
 # from collections import defaultdict
 from pyrocko import moment_tensor as pmt
 from pyrocko.plot import beachball, mpl_color
 
 from ._plot_base import (
+    catalog_filter,
     check_format,
     check_time,
     convert_channel_index,
@@ -120,28 +122,74 @@ def _status_message_and_fig_name(
 
 
 def catalog_compare(
-    catalog: dict[int, dict[str, Any]], tol: int
+    catalog: dict[int, dict[str, Any]], time_tol=5.0, dist_tol=10
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Finding the common and unique events in 2 given catalog. (main = 0, standard = 1)
-    """
+    # TODO: setting a rule to automatically decide which catalog is the main catalog.
     # TODO: a better naming idiom, comp catalog or standard catalog.
+    """
     df_main, timestamp_main = check_format(catalog=catalog, i=0)
     df_standard, timestamp_std = check_format(catalog=catalog, i=1)
+    df_main.loc[:, 'comp_index'] = -1
+    df_standard.loc[:, 'comp_index'] = -1
     diff_time = timestamp_main - timestamp_std[:, np.newaxis]
-    main_boolean = (np.abs(diff_time) < tol).any(axis=0)  # axis=0 -> comparing the main
-    std_boolean = (np.abs(diff_time) < tol).any(axis=1)
-    main_common = df_main[main_boolean]
-    standard_common = df_standard[std_boolean]
-    # Giving the index that from compared event
-    # TODO: setting a rule to automatically decide which catalog is the main catalog.
-    std_indices, main_indices = np.where(np.abs(diff_time) < tol)
-    # if len(set(std_indices)) < len(std_indices):
-    main_common.loc[:, 'comp_index'] = -1
-    for main_index, std_index in zip(main_indices, std_indices):
-        main_common.at[main_index, 'comp_index'] = std_index
-    main_only = df_main[~main_boolean]
-    standard_only = df_standard[~std_boolean]
+    std_indices, main_indices = np.where(np.abs(diff_time) < time_tol)
+    duplicates = {x for x in list(std_indices) if list(std_indices).count(x) > 1}
+    main_loc_box = []
+    for i in set(std_indices):
+        std_point = (df_standard.loc[i].latitude, df_standard.loc[i].longitude)
+        # print(df_standard.loc[i])
+        if i in duplicates:
+            locations = [index for index, value in enumerate(std_indices) if value == i]
+            test_dict = {}
+            for j in locations:
+                main_loc = main_indices[j]
+                value = diff_time[i][main_loc]
+                main_point = (
+                    df_main.loc[main_loc].latitude,
+                    df_main.loc[main_loc].longitude,
+                )
+                # print(df_main.loc[main_loc])
+                dist = geodesic(std_point, main_point).kilometers
+                if dist > dist_tol:
+                    print(f'dist: {dist}')
+                    continue
+                test_dict[main_loc] = value
+            if test_dict:
+                print(test_dict)
+                smallest_key = min(test_dict, key=test_dict.get)
+                df_main.at[smallest_key, 'comp_index'] = i
+                df_standard.at[i, 'comp_index'] = smallest_key
+        else:
+            location = [index for index, value in enumerate(std_indices) if value == i][
+                0
+            ]
+            main_loc = main_indices[location]
+            main_point = (
+                df_main.loc[main_loc].latitude,
+                df_main.loc[main_loc].longitude,
+            )
+            # print(df_main.loc[main_loc])
+            dist = geodesic(std_point, main_point).kilometers
+            if dist > dist_tol:
+                continue
+
+            if main_loc not in main_loc_box:
+                main_loc_box.append(main_loc)
+            else:
+                print(f'repeated main_loc: {main_loc}')
+                continue
+            df_main.at[main_loc, 'comp_index'] = i
+            df_standard.at[i, 'comp_index'] = main_loc
+
+    # post process of dataframe
+    main_common = df_main[df_main['comp_index'] != -1]
+    main_only = df_main[df_main['comp_index'] == -1]
+
+    standard_common = df_standard[df_standard['comp_index'] != -1]
+    standard_only = df_standard[df_standard['comp_index'] == -1]
+
     print(f'Main catalog: {len(main_common)}/{len(df_main)} founded')
     print(f'Compared catalog: {len(standard_common)}/{len(df_standard)} founded')
 
@@ -153,20 +201,6 @@ def pack(catalog_list: list[Path], name_list: list[str]) -> dict[int, dict[str, 
     for i, (catalog_path, name) in enumerate(zip(catalog_list, name_list)):
         pack_dict[i] = {'catalog': catalog_path, 'name': name}
     return pack_dict
-
-
-def catalog_filter(
-    catalog_df: pd.DataFrame, catalog_range: dict[str, float]
-) -> pd.DataFrame:
-    catalog_df = catalog_df[
-        (catalog_df['longitude'] > catalog_range['min_lon'])
-        & (catalog_df['longitude'] < catalog_range['max_lon'])
-        & (catalog_df['latitude'] > catalog_range['min_lat'])
-        & (catalog_df['latitude'] < catalog_range['max_lat'])
-        & (catalog_df['depth_km'] > catalog_range['min_depth'])
-        & (catalog_df['depth_km'] < catalog_range['max_depth'])
-    ]
-    return catalog_df
 
 
 def plot_ori(
@@ -192,36 +226,75 @@ def plot_ori(
 
         # cmap = "viridis"
         catalog_df = catalog_filter(catalog_df=catalog_df, catalog_range=catalog_range)
+        if 'event_type' in catalog_df.columns:
+            # This part we want to visualize the distribution of event_type.
+            color_map = {1: 'red', 2: 'blue', 3: 'green', 4: 'orange'}
+            label_map = {
+                1: 'seis 6P2S + DAS 15P',
+                2: 'seis 6P2S',
+                3: 'DAS 15P',
+                4: 'Not reach the standard',
+            }
+            for event_type, group in catalog_df.groupby('event_type'):
+                geo_ax.scatter(
+                    group['longitude'],
+                    group['latitude'],
+                    s=5,
+                    c=color_map[event_type],
+                    alpha=0.5,
+                    label=label_map[event_type],
+                    rasterized=True,
+                )
 
-        geo_ax.scatter(
-            catalog_df['longitude'],
-            catalog_df['latitude'],
-            s=5,
-            c='b' if i == 1 else 'r',
-            alpha=0.5,
-            label=f'{equip} event num: {len(catalog_df)}',
-            rasterized=True,
-        )
+                axes[0, 1].scatter(
+                    group['depth_km'],
+                    group['latitude'],
+                    s=5,
+                    c=color_map[event_type],
+                    alpha=0.5,
+                    label=label_map[event_type],
+                    rasterized=True,
+                )
 
-        axes[0, 1].scatter(
-            catalog_df['depth_km'],
-            catalog_df['latitude'],
-            s=5,
-            c='b' if i == 1 else 'r',
-            alpha=0.5,
-            label=f'{equip}',
-            rasterized=True,
-        )
+                axes[1, 0].scatter(
+                    group['longitude'],
+                    group['depth_km'],
+                    s=5,
+                    c=color_map[event_type],
+                    alpha=0.5,
+                    label=label_map[event_type],
+                    rasterized=True,
+                )
+        else:
+            geo_ax.scatter(
+                catalog_df['longitude'],
+                catalog_df['latitude'],
+                s=5,
+                c='b' if i == 1 else 'r',
+                alpha=0.5,
+                label=f'{equip} event num: {len(catalog_df)}',
+                rasterized=True,
+            )
 
-        axes[1, 0].scatter(
-            catalog_df['longitude'],
-            catalog_df['depth_km'],
-            s=5,
-            c='b' if i == 1 else 'r',
-            alpha=0.5,
-            label=f'{equip}',
-            rasterized=True,
-        )
+            axes[0, 1].scatter(
+                catalog_df['depth_km'],
+                catalog_df['latitude'],
+                s=5,
+                c='b' if i == 1 else 'r',
+                alpha=0.5,
+                label=f'{equip}',
+                rasterized=True,
+            )
+
+            axes[1, 0].scatter(
+                catalog_df['longitude'],
+                catalog_df['depth_km'],
+                s=5,
+                c='b' if i == 1 else 'r',
+                alpha=0.5,
+                label=f'{equip}',
+                rasterized=True,
+            )
 
 
 def plot_bypass(
@@ -276,36 +349,75 @@ def plot_scenario(
     df_list, nm_list = plot_bypass(catalog, tol, use_both, use_main, use_common)
     for i, (catalog_df, equip) in enumerate(zip(df_list, nm_list)):
         catalog_df = catalog_filter(catalog_df=catalog_df, catalog_range=catalog_range)
+        if 'event_type' in catalog_df.columns:
+            # This part we want to visualize the distribution of event_type.
+            color_map = {1: 'red', 2: 'blue', 3: 'green', 4: 'orange'}
+            label_map = {
+                1: 'seis 6P2S + DAS 15P',
+                2: 'seis 6P2S',
+                3: 'DAS 15P',
+                4: 'Not reach the standard',
+            }
+            for event_type, group in catalog_df.groupby('event_type'):
+                geo_ax.scatter(
+                    group['longitude'],
+                    group['latitude'],
+                    s=5,
+                    c=color_map[event_type],
+                    alpha=0.5,
+                    label=label_map[event_type],
+                    rasterized=True,
+                )
 
-        geo_ax.scatter(
-            catalog_df['longitude'],
-            catalog_df['latitude'],
-            s=5,
-            c='b' if i == 1 else 'r',
-            alpha=0.5,
-            label=f'{equip}\ncommon event num: {len(catalog_df)}',
-            rasterized=True,
-        )
+                axes[0, 1].scatter(
+                    group['depth_km'],
+                    group['latitude'],
+                    s=5,
+                    c=color_map[event_type],
+                    alpha=0.5,
+                    label=label_map[event_type],
+                    rasterized=True,
+                )
 
-        axes[0, 1].scatter(
-            catalog_df['depth_km'],
-            catalog_df['latitude'],
-            s=5,
-            c='b' if i == 1 else 'r',
-            alpha=0.5,
-            label=equip,
-            rasterized=True,
-        )
+                axes[1, 0].scatter(
+                    group['longitude'],
+                    group['depth_km'],
+                    s=5,
+                    c=color_map[event_type],
+                    alpha=0.5,
+                    label=label_map[event_type],
+                    rasterized=True,
+                )
+        else:
+            geo_ax.scatter(
+                catalog_df['longitude'],
+                catalog_df['latitude'],
+                s=5,
+                c='b' if i == 1 else 'r',
+                alpha=0.5,
+                label=f'{equip}\ncommon event num: {len(catalog_df)}',
+                rasterized=True,
+            )
 
-        axes[1, 0].scatter(
-            catalog_df['longitude'],
-            catalog_df['depth_km'],
-            s=5,
-            c='b' if i == 1 else 'r',
-            alpha=0.5,
-            label=equip,
-            rasterized=True,
-        )
+            axes[0, 1].scatter(
+                catalog_df['depth_km'],
+                catalog_df['latitude'],
+                s=5,
+                c='b' if i == 1 else 'r',
+                alpha=0.5,
+                label=equip,
+                rasterized=True,
+            )
+
+            axes[1, 0].scatter(
+                catalog_df['longitude'],
+                catalog_df['depth_km'],
+                s=5,
+                c='b' if i == 1 else 'r',
+                alpha=0.5,
+                label=equip,
+                rasterized=True,
+            )
 
 
 def run_profile(

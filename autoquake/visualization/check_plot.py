@@ -1,6 +1,11 @@
 # import os
 # import glob
 # import math
+import logging
+
+# from obspy.imaging.beachball import beach
+import multiprocessing as mp
+from functools import partial
 
 # import calendar
 # from datetime import datetime, timedelta
@@ -13,14 +18,30 @@ import matplotlib.pyplot as plt
 # from matplotlib.ticker import MultipleLocator
 import pandas as pd
 from cartopy.mpl.geoaxes import GeoAxes
+from matplotlib.gridspec import GridSpec
 
-# from obspy.imaging.beachball import beach
-# import multiprocessing as mp
 # from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
 # from collections import defaultdict
 # from pyrocko import moment_tensor as pmt
 # from pyrocko.plot import beachball, mpl_color
-from ._plot_base import *
+from ._plot_base import (
+    _find_phasenet_das_pick,
+    _find_phasenet_seis_pick,
+    _preprocess_phasenet_csv,
+    add_on_utc_time,
+    catalog_filter,
+    check_format,
+    find_gamma_h3dd,
+    find_gamma_pick,
+    find_sac_data,
+    get_das_beach,
+    get_mapview,
+    plot_station,
+    plot_waveform_check,
+    polarity_color_select,
+    preprocess_gamma_csv,
+    station_mask,
+)
 from .comp_plot import find_compared_gafocal_polarity
 
 
@@ -53,8 +74,8 @@ def plot_asso_map(
     """
     ## This is the map for plotting association.
     """
-    # map_proj = ccrs.PlateCarree()
-    # tick_proj = ccrs.PlateCarree()
+    map_proj = ccrs.PlateCarree()
+    tick_proj = ccrs.PlateCarree()
     # if main_ax is None and sub_ax is None:
     #     fig = plt.figure(figsize=(8, 12))
     # gs = GridSpec(2, 1, height_ratios=[3, 1])
@@ -64,6 +85,8 @@ def plot_asso_map(
     if not df_seis_station.empty:
         # get seismic station
         if main_ax is None:
+            fig = plt.figure(figsize=(8, 12))
+            gs = GridSpec(2, 1, height_ratios=[3, 1])
             main_ax = fig.add_subplot(gs[0], projection=map_proj)
         if main_region is None:
             main_region = [
@@ -72,7 +95,11 @@ def plot_asso_map(
                 df_seis_station['latitude'].min() - 0.5,
                 df_seis_station['latitude'].max() + 0.5,
             ]
-        get_mapview(main_region, main_ax)
+        get_mapview(
+            main_region,
+            main_ax,
+            title=f"{event_dict['gamma']['event_time']}\nLat: {event_dict['gamma']['event_lat']} Lon: {event_dict['gamma']['event_lon']} depth: {event_dict['gamma']['event_depth']}",
+        )
         main_ax.scatter(
             x=df_seis_station['longitude'],
             y=df_seis_station['latitude'],
@@ -131,7 +158,7 @@ def plot_asso_map(
                 df_das_station['latitude'].min() - 0.01,
                 df_das_station['latitude'].max() + 0.01,
             ]
-        get_mapview(sub_region, sub_ax)
+        get_mapview(sub_region, sub_ax, title='')
         sub_ax.scatter(
             x=df_das_station['longitude'],
             y=df_das_station['latitude'],
@@ -200,7 +227,6 @@ def plot_asso(
     h3dd_hout=None,
     amplify_index=5,
     sac_parent_dir=None,
-    sac_dir_name=None,
     h5_parent_dir=None,
     station_mask=station_mask,
     seis_region=None,
@@ -242,13 +268,25 @@ def plot_asso(
         status = 'gamma'
         use_h3dd = False
 
+    time_str = (
+        event_dict[status]['event_time']
+        .replace(':', '_')
+        .replace('-', '_')
+        .replace('.', '_')
+    )
+    save_name = f'event_{event_i}_{time_str}.png'
+
+    # Check if this event has already been processed
+    if (fig_dir / save_name).exists():
+        logging.info(f'Skipping event {event_i}: file already exists.')
+        return  # Skip processing for this event
     # figure setting
     fig = plt.figure()
     map_proj = ccrs.PlateCarree()
     # tick_proj = ccrs.PlateCarree()
 
     # retrieving data
-    if sac_parent_dir is not None and sac_dir_name is not None:
+    if sac_parent_dir is not None:
         sac_dict = find_sac_data(
             event_time=event_dict[status]['event_time'],
             date=event_dict['gamma']['date'],
@@ -269,7 +307,7 @@ def plot_asso(
 
     if h5_parent_dir is not None:
         das_map_ax = fig.add_axes([0.3, -0.15, 0.4, 0.55], projection=map_proj)
-        das_waveform_ax = fig.add_axes([0.82, -0.15, 0.8, 0.55], sharey=das_map_ax)
+        das_waveform_ax = fig.add_axes([0.82, -0.15, 0.8, 0.55])  # , sharey=das_map_ax)
         if seis_map_ax is None:
             das_waveform_ax.set_title(
                 f"Event_{event_i}: {event_dict[status]['event_time']}, lat: {event_dict[status]['event_lat']}, lon: {event_dict[status]['event_lon']}, depth: {event_dict[status]['event_depth']} km"
@@ -277,11 +315,22 @@ def plot_asso(
     else:
         das_map_ax = None
         das_waveform_ax = None
-    df_seis_phasenet_picks, df_das_phasenet_picks = find_phasenet_pick(
-        event_total_seconds=event_dict[status]['event_total_seconds'],
+
+    starttime = add_on_utc_time(df_event['time'].iloc[0], -30)
+    endtime = add_on_utc_time(df_event['time'].iloc[0], 60)
+
+    df_das_phasenet_picks = _find_phasenet_das_pick(
+        starttime=starttime,
+        endtime=endtime,
+        df_picks=df_phasenet_picks,
+    )
+    df_seis_phasenet_picks = _find_phasenet_seis_pick(
+        starttime=starttime,
+        endtime=endtime,
+        df_picks=df_phasenet_picks,
         sac_dict=sac_dict,
-        df_all_picks=df_phasenet_picks,
-        station_mask=station_mask,
+        picking_check=False,
+        asso_check=True,
     )
     df_seis_gamma_picks, df_das_gamma_picks = find_gamma_pick(
         df_gamma_picks=df_event_picks,
@@ -291,11 +340,12 @@ def plot_asso(
     )
     plot_waveform_check(
         sac_dict=sac_dict,
+        starttime=starttime,
+        end_time=endtime,
         df_seis_phasenet_picks=return_none_if_empty(df_seis_phasenet_picks),
         df_seis_gamma_picks=return_none_if_empty(df_seis_gamma_picks),
         df_das_phasenet_picks=return_none_if_empty(df_das_phasenet_picks),
         df_das_gamma_picks=return_none_if_empty(df_das_gamma_picks),
-        event_total_seconds=event_dict[status]['event_total_seconds'],
         h5_parent_dir=h5_parent_dir,
         das_ax=das_waveform_ax,
         seis_ax=seis_waveform_ax,
@@ -312,18 +362,52 @@ def plot_asso(
         main_region=seis_region,
         sub_region=das_region,
     )
-    save_name = (
-        event_dict[status]['event_time']
-        .replace(':', '_')
-        .replace('-', '_')
-        .replace('.', '_')
-    )
 
     plt.tight_layout()
-    plt.savefig(
-        fig_dir / f'event_{event_i}_{save_name}.png', bbox_inches='tight', dpi=300
-    )
+    plt.savefig(fig_dir / save_name, bbox_inches='tight', dpi=300)
     plt.close()
+
+
+def parallel_plot_asso(
+    phasenet_picks: Path,
+    gamma_events: Path,
+    gamma_picks: Path,
+    station: Path,
+    fig_dir: Path,
+    sac_parent_dir: Path,
+    h5_parent_dir: Path | None = None,
+    processes=10,
+):
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=fig_dir / 'aso.log',
+        filemode='w',
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    )
+    df_events = pd.read_csv(gamma_events)
+    event_list = list(df_events['event_index'])
+    df_phasenet_picks = _preprocess_phasenet_csv(
+        phasenet_picks, get_station=lambda x: x
+    )
+    partial_plot_asso = partial(
+        plot_asso, sac_parent_dir=sac_parent_dir, h5_parent_dir=h5_parent_dir
+    )
+    with mp.Pool(processes=processes) as pool:
+        pool.starmap(
+            partial_plot_asso,
+            [
+                (
+                    df_phasenet_picks,
+                    gamma_picks,
+                    gamma_events,
+                    station,
+                    event_i,
+                    fig_dir,
+                )
+                for event_i in event_list
+            ],
+        )
 
 
 def _add_epicenter(
@@ -606,3 +690,114 @@ def get_polarity_profiles(
         plt.savefig(
             figure_dir / 'pol_map.png', dpi=300, bbox_inches='tight'
         )  # using fig.savefig when we have several figs.
+
+
+def plot_mapview(
+    station: Path,
+    catalog: pd.DataFrame,
+    catalog_filter_: dict | None = None,
+    title='Event distribution',
+    main_eq=(),
+    main_eq_size=10,
+    event_size=10,
+    plot_station_name=True,
+    plot_event_name=True,
+    station_mask=station_mask,
+):
+    """
+    catalog should at least contains the lon and lat.
+
+    """
+    # plot setting
+    fig, geo_ax = plt.subplots(
+        1, 1, figsize=(12, 14), subplot_kw={'projection': ccrs.PlateCarree()}
+    )
+
+    # sub_ax = fig.add_subplot(4, 4, 1, projection=ccrs.PlateCarree())
+
+    # base_map
+    if catalog_filter_ is None:
+        region = [
+            catalog['longitude'].min() - 0.2,
+            catalog['longitude'].max() + 0.2,
+            catalog['latitude'].min() - 0.2,
+            catalog['latitude'].max() + 0.2,
+        ]
+    else:
+        region = [
+            catalog_filter_['min_lon'],
+            catalog_filter_['max_lon'],
+            catalog_filter_['min_lat'],
+            catalog_filter_['max_lat'],
+        ]
+    get_mapview(region=region, ax=geo_ax, title=title)
+
+    # trim the catalog
+    catalog = catalog_filter(catalog_df=catalog, catalog_range=catalog_filter_)
+
+    # station
+    df_station = pd.read_csv(station)
+    plot_station(
+        df_station=df_station,
+        geo_ax=geo_ax,
+        plot_station_name=plot_station_name,
+        text_dist=0.005,
+    )
+
+    # add all events
+    event_num = len(catalog)
+    if 'event_type' in catalog.columns:
+        # This part we want to visualize the distribution of event_type.
+        color_map = {1: 'red', 2: 'blue', 3: 'green', 4: 'orange'}
+        label_map = {
+            1: 'seis 6P2S + DAS 15P',
+            2: 'seis 6P2S',
+            3: 'DAS 15P',
+            4: 'Not reach the standard',
+        }
+        for event_type, group in catalog.groupby('event_type'):
+            num = len(group)
+            geo_ax.scatter(
+                group['longitude'],
+                group['latitude'],
+                s=event_size,
+                c=color_map[event_type],
+                alpha=0.5,
+                label=f'{label_map[event_type]}: {num}',
+                rasterized=True,
+                zorder=3,
+            )
+            if plot_event_name:
+                for _, row in group.iterrows():
+                    geo_ax.text(
+                        x=row['longitude'],
+                        y=row['latitude'],
+                        s=row['event_index'],
+                    )
+    else:
+        geo_ax.scatter(
+            catalog['longitude'],
+            catalog['latitude'],
+            s=event_size,
+            c='r',
+            alpha=0.5,
+            label=f'Event num: {event_num}',
+            zorder=3,
+        )
+
+    # add main eq
+    _add_epicenter(x=main_eq[0], y=main_eq[1], ax=geo_ax, size=main_eq_size)
+
+    # ax setting
+    geo_ax.set_xlim(region[0], region[1])
+    geo_ax.set_ylim(region[2], region[3])
+    # geo_ax.autoscale(tight=True)
+    geo_ax.set_aspect('auto')
+    geo_ax.legend(
+        loc='upper left',
+        markerscale=2,
+        labelspacing=1.5,
+        borderpad=1,
+        fontsize=15,
+        framealpha=0.6,
+    )
