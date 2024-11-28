@@ -3,6 +3,9 @@
 /test_format
 /test/seis
 /test/das
+/test_agu
+/Seis_20240401_20240417
+
 # output and some text
 *.png
 gmt.history
@@ -22,7 +25,6 @@ gmt.history
 test*.py
 play.py
 plot_design.py
-quick.py
 
 testset*
 # H3DD
