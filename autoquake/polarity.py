@@ -194,7 +194,7 @@ class DitingMotion:
         window = f'{self.interval*index}_{self.interval*(index+1)}.h5'
         if self.h5_parent_dir is not None:
             try:
-                file = list((self.h5_parent_dir / ymd).glob(f'*{window}'))[0]
+                file = list((self.h5_parent_dir / f'{ymd}_hdf5').glob(f'*{window}'))[0]
             except IndexError:
                 logging.info(f'File not found for window {window}')
                 return []
@@ -295,7 +295,7 @@ class DitingMotion:
         """
         Processing the row from dataframe, deciding whether the station type is DAS or seismometer by giving function.
         """
-        if self.type_judge(row.station_id):
+        if not self.type_judge(row.station_id):
             data = self.das_get_data(
                 sta_name=row.station_id,
                 p_arrival=row.phase_time,
@@ -319,7 +319,7 @@ class DitingMotion:
             (df_picks['event_index'] == event_index) & (df_picks['phase_type'] == 'P')
         ]
         # Iterate through the selected picks
-        # logging.info(f'event index: {event_index} start processing')
+        logging.info(f'event index: {event_index} start processing')
         session_options = ort.SessionOptions()
         session_options.intra_op_num_threads = 1
         session_options.inter_op_num_threads = 1
@@ -331,7 +331,7 @@ class DitingMotion:
             df_row = self.process_row(row=row, motion_model=ort_session)
             if not df_row.empty:
                 processed_rows.append(df_row)
-        # logging.info(f'event index: {event_index} processing over')
+        logging.info(f'event index: {event_index} processing over')
         return processed_rows
 
     def run_parallel_predict(self, processes=3):

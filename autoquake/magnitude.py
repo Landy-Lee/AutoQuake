@@ -484,6 +484,8 @@ class Magnitude:
         code_error_set = set()
         hor_comp_error_dict = {}
         for station in set(df_picks['station']):
+            if station[1].isdigit():
+                continue
             df_sta_picks = df_picks[df_picks['station'] == station].copy()
 
             t1, t2, tt1, tt2 = self._calculate_time_window(df_sta_picks)
