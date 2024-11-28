@@ -335,3 +335,52 @@ class GaMMA:
             index=False,
             date_format='%Y-%m-%dT%H:%M:%S.%f',
         )
+
+    @staticmethod
+    def classify_event(row, picks):
+        event_index = row['event_index']
+        filtered_picks = picks[picks['event_index'] == event_index]
+
+        # Filter DAS and seismic picks
+        das_picks = filtered_picks[
+            filtered_picks['station_id'].map(lambda x: x[1].isdigit())
+        ]
+        seis_picks = filtered_picks[
+            filtered_picks['station_id'].map(lambda x: x[1].isalpha())
+        ]
+
+        # Count phase types
+        das_counts = das_picks['phase_type'].value_counts()
+        seis_counts = seis_picks['phase_type'].value_counts()
+
+        # Extract counts
+        das_count_p = das_counts.get('P', 0)
+        das_count_s = das_counts.get('S', 0)
+        seis_count_p = seis_counts.get('P', 0)
+        seis_count_s = seis_counts.get('S', 0)
+
+        # Classify event
+        if seis_count_p >= 6 and seis_count_s >= 2:
+            event_type = 1 if das_count_p >= 15 else 2
+        elif das_count_p >= 15:
+            event_type = 3
+        else:
+            event_type = 4
+
+        # Add results to row
+        row['seis_p_picks'] = seis_count_p
+        row['seis_s_picks'] = seis_count_s
+        row['das_p_picks'] = das_count_p
+        row['das_s_picks'] = das_count_s
+        row['event_type'] = event_type
+        return row
+
+    # Apply function to each row in df_events
+    @staticmethod
+    def get_detailed_picks(gamma_events: Path, gamma_picks: Path):
+        df_events = pd.read_csv(gamma_events)
+        df_picks = pd.read_csv(gamma_picks)
+        df_events = df_events.apply(
+            lambda row: GaMMA.classify_event(row, df_picks), axis=1
+        )
+        return df_events
