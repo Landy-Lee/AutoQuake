@@ -47,7 +47,7 @@ If you’re interested in contributing to the development of this project, follo
    cd AutoQuake
    ```
 3. **Install dependecies**: Follow the installation instructions in the [Installation](#installation) section.
-4. **Create a new branch**: It’s a good practice to work on a feature or bug fix in a separate branch.
+4. **Create a new branch (optional)**: It’s a good practice to work on a feature or bug fix in a separate branch.
    ```bash
    git checkout -b feature/your-feature-name
    ```
