@@ -22,47 +22,57 @@
 To get started with this project, choose the scenario that best describes your needs:
 
 ### Scenario 1: Preliminary Users (Use Only)
-
+![For Preliminary users](images/for_normal_user.png)
 If you only want to use the package without contributing to the codebase, follow these simple steps:
 
-1. **Clone the repository**:
+1. **Clone the repository and init the submodules (both HTTPS or SSH is fine)**:
    ```bash
    git clone --branch main git@github.com:IES-ESLab/AutoQuake.git
    cd AutoQuake
+   ./init_submodules.sh # use sh to execute the script if powershell.
    ```
 2. **Install dependecies**: Follow the installation instructions in the [Installation](#installation) section.
-3. **Use the Package**: Follow the instructions in the Usage section to start generating earthquake catalogs.
-4. **Report Issues**: If you encounter any problems or have suggestions for improvement, please [open or report an issue](https://github.com/IES-ESLab/AutoQuake/issues). Describe the problem in detail to help us address it quickly.
-
+**Use the Package**: Follow the instructions in the Usage section to start generating earthquake catalogs.
+**Report Issues**: If you encounter any problems or have suggestions for improvement, please [open or report an issue](https://github.com/IES-ESLab/AutoQuake/issues). Describe the problem in detail to help us address it quickly.
+**Pull Updates**: Regularly pull updates from the original repository to keep your local copy synchronized and avoid conflicts.
+   ```bash
+   git pull origin main
+   ```
 ### Scenario 2: Contributors (Recommended. Develop and Improve)
-
+![For contributors](images/for_contributor.png)
 If you’re interested in contributing to the development of this project, follow these steps:
 
-
-
 1. **Fork the repository**: Visit the GitHub page of the repository and click on "Fork" to create your own copy.
-2. **Clone your forked repository**:
+2. **Clone your forked repository and init the submodules (both HTTPS or SSH is fine)**:
    ```bash
    git clone --branch dev https://github.com/your-username/AutoQuake.git # clone the dev branch
    cd AutoQuake
+   ./init_submodules.sh # use sh to execute the script if powershell.
    ```
 3. **Install dependecies**: Follow the installation instructions in the [Installation](#installation) section.
-4. **Create a new branch (optional)**: It’s a good practice to work on a feature or bug fix in a separate branch.
+4. **Adding remote for original repository**: Connect your local repository to the original (upstream) repository to fetch updates.    
    ```bash
-   git checkout -b feature/your-feature-name
+   git remote add upstream https://github.com/IES-ESLab/AutoQuake.git
    ```
-5. **Make your changes** and **commit** them:
+4. **Make your changes**:
    ```bash
    git add .
+   ```
+5. **commit** them:
+   ```bash
    git commit -m "Description of your changes"
    ```
-6. **Push your changes** to your forked repository:
+6. **Push your changes** to your forked repository when you're ready to share your work:
    ```bash
    git push origin feature/your-feature-name
    ```
-7. **Open a Pull Request**: Once your changes are pushed, go to the original repository on GitHub and open a Pull Request from your branch to the dev branch of the main repository.
+**Pull Updates**: Regularly pull updates from the original repository to keep your local copy synchronized and avoid conflicts.
+   ```bash
+   git pull upstream main
+   ```
+**Open a Pull Request**: Once your changes are pushed, go to the original repository on GitHub and open a Pull Request from your branch to the dev branch of the main repository.
 Read to our [Contributing](#contributing) section for more details on how to contribute to this project.
-
+**Report Issues**: You can help resolving the issues.    
 ## Installation
 This package supports both `requirements.txt` and `env.yml` for dependency management. Choose one of the following installation methods:    
 
@@ -84,16 +94,21 @@ The `pyproject.toml` file contains configuration settings, including code lintin
    ```bash
    pip install ruff
    ```
-## Dataset Structure (both hdf5 for DAS and SAC for Seismometer)
+## Dataset Structure (Different data format in different data directory)
 **Important**: For the package to function correctly, the dataset must follow a specific directory structure. Ensure your data is organized as follows:    
+For seismometer:    
    ```bash
    /dataset_parent_dir/
-    ├── YYYYMMDD/             # Year-Month-Day format for each data folder
+    ├── \*YYYYMMDD\*/         # data folder should contain the Year-Month-Day format for glob. 
     │   └── waveform.SAC      # Waveform data in SAC format
    ```
-- **Waveform files** should be placed in YYYYMMDD subdirectories under the dataset_parent_dir.
-- Certain steps or programs may require that the dataset be placed in specific directories to operate correctly due to their original design.
-## Usage
+For DAS:    
+   ```bash
+   /dataset_parent_dir/
+    ├── \*YYYYMMDD\*/          
+    │   └── MiDAS_20240402_86100_86400.h5      # Waveform data in h5 format
+   ```
+<!-- ## Usage
 This package includes a Sphinx-generated documentation site and a Jupyter Notebook for a step-by-step guideline.     
 ###  Documentation
 The documentation includes:
@@ -113,7 +128,7 @@ We encourage developers to contribute to this project. Here’s a quick guide:
 1. **Fork the repository** and **clone your fork** (recommended to work with the dev branch).
 2. **Create a new branch** for your feature or bug fix.
 3. **Make changes** and **commit** them.
-4. **Push to your branch** and **open a Pull Request** to the `dev` branch.
+4. **Push to your branch** and **open a Pull Request** to the `dev` branch. -->
 ## Roadmap
 Here are the planned future improvements for this project:
 
