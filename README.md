@@ -54,15 +54,15 @@ If you’re interested in contributing to the development of this project, follo
    ```bash
    git remote add upstream https://github.com/IES-ESLab/AutoQuake.git
    ```
-4. **Make your changes**:
+5. **Make your changes**:
    ```bash
    git add .
    ```
-5. **commit** them:
+6. **commit** them:
    ```bash
    git commit -m "Description of your changes"
    ```
-6. **Push your changes** to your forked repository when you're ready to share your work:
+7. **Push your changes** to your forked repository when you're ready to share your work:
    ```bash
    git push origin feature/your-feature-name
    ```

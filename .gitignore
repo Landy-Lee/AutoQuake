@@ -4,10 +4,11 @@
 /test/seis
 /test/das
 /test_agu
+/test
 /Seis_20240401_20240417
 
 # output and some text
-*.png
+
 gmt.history
 *.log
 *.csv
