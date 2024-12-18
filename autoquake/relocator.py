@@ -13,7 +13,7 @@ def get_index_table(gamma_reorder_event: Path) -> pd.DataFrame:
     if 'h3dd_event_index' in df.columns:
         df_table = df.loc[:, ['event_index', 'h3dd_event_index']]
     else:
-        df['h3dd_event_index'] = df.index + 1
+        df['h3dd_event_index'] = df.index
         df_table = df.loc[:, ['event_index', 'h3dd_event_index']]
     assert isinstance(df_table, pd.DataFrame)
     return df_table
@@ -158,7 +158,7 @@ class H3DD:
         df['time'] = pd.to_datetime(df['time'])
         df_sort = df.sort_values(by='time')
         df_sort = df_sort.reset_index(drop=True)
-        df_sort['h3dd_event_index'] = df_sort.index + 1
+        df_sort['h3dd_event_index'] = df_sort.index
 
         if gamma_reorder_event is None:
             gamma_reorder_event = self.gamma_event.parent / 'gamma_reorder_event.csv'
@@ -424,7 +424,7 @@ class H3DD:
                         polarity = ' '
 
                     fo.write(
-                        f'{line[:19]}{polarity} {line[21:].strip()} 0.00 0.00 0.00 {sta_mag:4.2f} 0   0.0\n'
+                        f'{line[:19]}{polarity}{line[20:55]} 0.00 0.00 0.00 {sta_mag:4.2f} 0   0.0\n'
                     )
         return ori_dout.name
 
@@ -467,7 +467,7 @@ class H3DD:
                         polarity = ' '
 
                     fo.write(
-                        f'{line[:19]}{polarity} {line[21:].strip()} 0.00 0.00 0.00 0.00 0   0.0\n'
+                        f'{line[:19]}{polarity}{line[20:55]} 0.00 0.00 0.00 0.00 0   0.0\n'
                     )
 
         return ori_dout.name

@@ -1,6 +1,5 @@
 # import glob
 import logging
-import math
 
 # import calendar
 import multiprocessing as mp
@@ -13,7 +12,6 @@ from typing import Any
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-import h5py
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,19 +24,17 @@ from geopy.distance import geodesic
 from matplotlib.axes import Axes
 from matplotlib.colors import LightSource
 from matplotlib.gridspec import GridSpec
-from matplotlib.ticker import MultipleLocator
-from obspy import Trace, UTCDateTime, read
-
-# from collections import defaultdict
 from pyrocko import moment_tensor as pmt
 from pyrocko.plot import beachball, mpl_color
 
+# from collections import defaultdict
 from ._plot_base import (
+    _hout_generate,
     catalog_filter,
     check_format,
-    check_time,
-    convert_channel_index,
-    degree_trans,
+    find_gafocal_polarity,
+    plot_beachball_info,
+    plot_polarity_waveform,
     plot_station,
     station_mask,
 )
@@ -236,13 +232,14 @@ def plot_ori(
                 4: 'Not reach the standard',
             }
             for event_type, group in catalog_df.groupby('event_type'):
+                num = len(group)
                 geo_ax.scatter(
                     group['longitude'],
                     group['latitude'],
                     s=5,
                     c=color_map[event_type],
                     alpha=0.5,
-                    label=label_map[event_type],
+                    label=f'{label_map[event_type]}: {num}',
                     rasterized=True,
                 )
 
@@ -712,34 +709,6 @@ def plot_profile(
         print(result)
 
 
-def hout_generate(polarity_dout: Path, analyze_year: str) -> pd.DataFrame:
-    """
-    Because the CWA polarity dout did not have the corresponded hout file,
-    so create a DataFrame with the same format as hout file.
-    """
-    with open(polarity_dout) as r:
-        lines = r.readlines()
-    data = []
-    for line in lines:
-        if line.strip()[:4] == analyze_year:
-            year = int(line[1:5].strip())
-            month = int(line[5:7].strip())
-            day = int(line[7:9].strip())
-            hour = int(line[9:11].strip())
-            min = int(line[11:13].strip())
-            second = float(line[13:19].strip())
-            time = f'{year:4}-{month:02}-{day:02}T{hour:02}:{min:02}:{second:09.6f}'
-            lat_part = line[19:26].strip()
-            lon_part = line[26:34].strip()
-            event_lon = round(degree_trans(lon_part), 3)
-            event_lat = round(degree_trans(lat_part), 3)
-            depth = line[34:40].strip()
-            data.append([time, event_lat, event_lon, depth])
-    columns = ['time', 'latitude', 'longitude', 'depth']
-    df = pd.DataFrame(data, columns=columns)
-    return df
-
-
 def find_index_backward(gamma_catalog: Path, focal_dict: dict) -> int:
     """
     This is used to find the gamma event that survive in comparing CWA catalog
@@ -1053,282 +1022,48 @@ def add_event_index(target_file: Path, output_file: Path, analyze_year: str):
                 event.write(f"{' ':1}{line.strip()}{' ':1}{event_index:<5}\n")
 
 
-def _get_seis(
-    sta,
-    sac_parent_dir,
-    date,
-    sac_dir_name,
-    p_arrival,
-    train_window=0.64,
-    visual_window=2,
-    sampling_rate=100,
-):
-    sac_path = sac_parent_dir / date / sac_dir_name
-    train_starttime_trim = p_arrival - train_window
-    train_endtime_trim = p_arrival + train_window
-    window_starttime_trim = p_arrival - visual_window
-    window_endtime_trim = p_arrival + visual_window
-    try:
-        # TODO: filtering like using 00 but not 10.
-        data_path = list(sac_path.glob(f'*{sta}.*Z.*'))[0]
-        st = read(data_path)
-        st.detrend('demean')
-        st.detrend('linear')
-        st.filter('bandpass', freqmin=1, freqmax=10)
-        st.taper(0.001)
-        st.resample(sampling_rate=sampling_rate)
-        # this is for visualize length
-        st[0].trim(starttime=window_starttime_trim, endtime=window_endtime_trim)
-        visual_time = np.arange(
-            0, 2 * visual_window + 1 / sampling_rate, 1 / sampling_rate
-        )  # using array to ensure the time length as same as time_window.
-        visual_sac = st[0].data
-        # this is actual training length
-        st[0].trim(starttime=train_starttime_trim, endtime=train_endtime_trim)
-        start_index = visual_window - train_window
-        train_time = np.arange(
-            start_index,
-            start_index + 2 * train_window + 1 / sampling_rate,
-            1 / sampling_rate,
-        )  # using array to ensure the time length as same as time_window.
-        train_sac = st[0].data
-    except Exception:
-        logging.info(f"we can't access the {sta}")
-    return visual_time, visual_sac, train_time, train_sac
-
-
-def _get_das(
-    sta: str,
-    p_arrival,
-    total_seconds: float,
-    hdf5_parent_dir: Path,
-    interval=300,
-    train_window=0.64,
-    visual_window=2,
-    sampling_rate=100,
-):
-    index = int(total_seconds // interval)
-    window = f'{interval*index}_{interval*(index+1)}.h5'
-    try:
-        file = list(hdf5_parent_dir.glob(f'*{window}'))[0]
-    except IndexError:
-        logging.info(f'File not found for window {window}')
-    channel_index = convert_channel_index(sta)
-    tr = Trace()
-    try:
-        with h5py.File(file, 'r') as fp:
-            ds = fp['data']
-            data = ds[channel_index]
-            tr.stats.sampling_rate = 1 / ds.attrs['dt_s']
-            tr.stats.starttime = ds.attrs['begin_time']
-            tr.data = data
-        train_starttime_trim = p_arrival - train_window
-        train_endtime_trim = p_arrival + train_window
-        window_starttime_trim = p_arrival - visual_window
-        window_endtime_trim = p_arrival + visual_window
-
-        tr.detrend('demean')
-        tr.detrend('linear')
-        tr.filter('bandpass', freqmin=1, freqmax=10)
-        tr.taper(0.001)
-        tr.resample(sampling_rate=sampling_rate)
-        # this is for visualize length
-        tr.trim(starttime=window_starttime_trim, endtime=window_endtime_trim)
-        visual_time = np.arange(
-            0, 2 * visual_window + 1 / sampling_rate, 1 / sampling_rate
-        )  # using array to ensure the time length as same as time_window.
-        visual_sac = tr.data
-        # this is actual training length
-        tr.trim(starttime=train_starttime_trim, endtime=train_endtime_trim)
-        start_index = visual_window - train_window
-        train_time = np.arange(
-            start_index,
-            start_index + 2 * train_window + 1 / sampling_rate,
-            1 / sampling_rate,
-        )  # using array to ensure the time length as same as time_window.
-        train_sac = tr.data
-    except Exception as e:
-        print(e)
-    return visual_time, visual_sac, train_time, train_sac
-
-
-def add_station_focal(
-    polarity_dout,
-    focal_dict,
-    analyze_year,
-    event_index,
-    get_waveform=True,
-    hdf5_parent_dir: Path | None = None,
-    sac_parent_dir=None,
-    sac_dir_name=None,
-    train_window=0.64,
-    visual_window=2,
-    sampling_rate=100,
-):
-    """
-    This is for dout format.
-    Parse azimuth, takeoff angle, and polarity from the output file.
-    ### TODO: We need to ensure the code execute the smallest part of the code.
-    """
-    with open(polarity_dout) as r:
-        lines = r.read().splitlines()
-    counter = -1
-    for line in lines:
-        if line.strip()[:4] == analyze_year:
-            counter += 1
-            if counter == event_index:
-                year = int(line[:5].strip())
-                month = int(line[5:7].strip())
-                day = int(line[7:9].strip())
-                hour = int(line[9:11].strip())
-                date = f'{year}{month:>02}{day:>02}'
-            # TODO Testify the event time again
-        elif counter == event_index:
-            sta = line[1:5].strip()
-            azi = int(line[12:15].strip())
-            toa = int(line[16:19].strip())
-            polarity = line[19:20]
-            p_min = int(line[20:23].strip())
-            p_sec = float(line[23:29].strip())
-            if 'station_info' not in focal_dict:
-                focal_dict['station_info'] = {}
-            year, month, day, hour, p_min, p_sec = check_time(
-                year, month, day, hour, p_min, p_sec
-            )
-            p_arrival = UTCDateTime(year, month, day, hour, p_min, p_sec)
-            # TODO: A better way to branch it
-            if not get_waveform:
-                focal_dict['station_info'][sta] = {
-                    'p_arrival': p_arrival,
-                    'azimuth': azi,
-                    'takeoff_angle': toa,
-                    'polarity': polarity,
-                }
-                continue
-            # finding sac part
-            # TODO: we need to create a _get_sac() & _get_das()
-            if sta[1].isalpha():
-                visual_time, visual_sac, train_time, train_sac = _get_seis(
-                    sta, sac_parent_dir, date, sac_dir_name, p_arrival
-                )
-            else:
-                total_seconds = hour * 3600 + p_min * 60 + p_sec
-                visual_time, visual_sac, train_time, train_sac = _get_das(
-                    sta, p_arrival, total_seconds, hdf5_parent_dir
-                )
-            # final writing
-            focal_dict['station_info'][sta] = {
-                'p_arrival': p_arrival,
-                'azimuth': azi,
-                'takeoff_angle': toa,
-                'polarity': polarity,
-                'visual_time': visual_time,
-                'visual_sac': visual_sac,
-                'train_time': train_time,
-                'train_sac': train_sac,
-            }
-
-
 def find_compared_gafocal_polarity(
-    gafocal_df: pd.DataFrame,
+    df_gafocal: pd.DataFrame,
     polarity_dout: Path,
-    analyze_year: str,
     event_index: int,
     use_gamma: bool,
     get_waveform=True,
-    hdf5_parent_dir=None,
+    h5_parent_dir=None,
     sac_parent_dir=None,
-    sac_dir_name=None,
     hout_file=None,
 ):
     """
     From gafocal to find the match event's polarity information and more.
-
-    Args:
-        gafocal_df: gafocal dataframe
-        polarity_file: polarity file in h3dd format
-        poalrity_file_index: polarity file with index (generated by add_event_index)
-        analyze_year: the year you want to analyze
-        event_index: event_index here is connect to standard catalog's row index!
-        use_gamma: whether use gamma format
-        source: source of the data, CWA or USGS
-        hdf5_parent_dir: parent directory of hdf5 files if use DAS.
-        sac_parent_dir: parent directory of sac files if use SEIS.
-        sac_dir_name: directory name of sac files if use SEIS.
-        hout_file: hout file in h3dd format.
-    Examples:
-        gamma_focal_dict = find_compared_gafocal_polarity(
-            gafocal_df=gamma_common,
-            polarity_file=main_polarity,
-            polarity_file_index=main_polarity_index,
-            analyze_year='2024',
-            event_index=1,
-            use_gamma=True,
-            source='GaMMA',
-            sac_parent_dir=sac_parent_dir,
-            sac_dir_name=sac_dir_name,
-            hdf5_parent_dir=h5_parent_dir
-            )
     """
     # TODO: currently we add hout index and polarity index here, but this would change.
     if hout_file is not None:
         df_hout, _ = check_format(hout_file)
     else:
-        df_hout = hout_generate(polarity_dout=polarity_dout, analyze_year=analyze_year)
+        df_hout = _hout_generate(polarity_dout=polarity_dout)
 
     df_hout['timestamp'] = df_hout['time'].apply(
         lambda x: datetime.fromisoformat(x).timestamp()
     )
 
-    gafocal_df['timestamp'] = gafocal_df['time'].apply(
+    df_gafocal['timestamp'] = df_gafocal['time'].apply(
         lambda x: datetime.fromisoformat(x).timestamp()
     )
-    if use_gamma:
-        event_info = gafocal_df[gafocal_df['comp_index'] == event_index]
-        event_info = event_info.iloc[0]
-    else:
-        event_info = gafocal_df.loc[event_index]
-    focal_dict = {
-        'utc_time': event_info.time,
-        'timestamp': event_info.timestamp,
-        'longitude': event_info.longitude,
-        'latitude': event_info.latitude,
-        'depth': event_info.depth_km,
-    }
-    focal_dict['focal_plane'] = {
-        'strike': int(event_info.strike.split('+')[0]),
-        'dip': int(event_info.dip.split('+')[0]),
-        'rake': int(event_info.rake.split('+')[0]),
-    }
-    focal_dict['quality_index'] = event_info.quality_index
-    focal_dict['num_of_polarity'] = event_info.num_of_polarity
-    df_test = df_hout[np.abs(df_hout['timestamp'] - event_info.timestamp) < 1]
-    df_test = df_test[
-        (
-            np.abs(df_test['longitude'] - event_info.longitude) < 0.02
-        )  # Use tolerance for floats
-        & (
-            np.abs(df_test['latitude'] - event_info.latitude) < 0.02
-        )  # Use tolerance for floats
-    ]
-
-    h3dd_index = df_test.index
-
-    add_station_focal(
+    focal_dict = find_gafocal_polarity(
+        df_gafocal=df_gafocal,
+        df_hout=df_hout,
         polarity_dout=polarity_dout,
-        focal_dict=focal_dict,
-        analyze_year=analyze_year,
-        event_index=h3dd_index,
+        event_index=event_index,
         get_waveform=get_waveform,
-        hdf5_parent_dir=hdf5_parent_dir,
         sac_parent_dir=sac_parent_dir,
-        sac_dir_name=sac_dir_name,
+        h5_parent_dir=h5_parent_dir,
+        comparing_mode=use_gamma,
     )
     return focal_dict
 
 
-def get_beach(source, focal_dict, ax, color='r'):
-    """Plot the beachball diagram."""
+# plotter
+def _get_beach_old(focal_dict, ax, color='r', source='AutoQuake'):
+    """Plot the beachball diagram. older version"""
     mt = pmt.MomentTensor(
         strike=focal_dict['focal_plane']['strike'],
         dip=focal_dict['focal_plane']['dip'],
@@ -1336,7 +1071,7 @@ def get_beach(source, focal_dict, ax, color='r'):
     )
     ax.set_axis_off()
     ax.set_xlim(-1.6, 1.6)
-    ax.set_ylim(-1.2, 1.2)
+    ax.set_ylim(-1.6, 1.6)
     projection = 'lambert'
 
     beachball.plot_beachball_mpl(
@@ -1381,187 +1116,96 @@ def get_beach(source, focal_dict, ax, color='r'):
             mfc='none',
         )
         ax.text(x + 0.025, y + 0.025, sta)
-    ax.text(
-        1.2,
-        -0.5,
-        f"{source}\nQuality index: {focal_dict['quality_index']}\nnum of station: {focal_dict['num_of_polarity']}\n\
-Strike: {focal_dict['focal_plane']['strike']}\nDip: {focal_dict['focal_plane']['dip']}\n\
-Rake: {focal_dict['focal_plane']['rake']}",
-        fontsize=20,
-    )
 
 
-# plotter
-def plot_polarity_waveform(
-    main_focal_dict: dict,
-    comp_focal_dict: dict,
-    fig=None,
-    gs=None,
-    n_cols=3,
-    train_window=0.64,
-    visual_window=2,
-    lw=0.7,
-    arrival_lw=0.5,
-):
-    focal_station_list = list(main_focal_dict['station_info'].keys())
-    comp_focal_station_list = list(comp_focal_dict['station_info'].keys())
-    wavenum = len(focal_station_list)
-    n_rows = math.ceil(wavenum / n_cols)
-    if fig is None:
-        fig = plt.figure(figsize=(16, 24))
-    gs = GridSpec(
-        n_rows, n_cols, left=0, right=0.6, top=0.8, bottom=0, hspace=0.4, wspace=0.05
-    )
-    diff_counter = 0
-    common_counter = 0
-    for index, station in enumerate(focal_station_list):
-        polarity = main_focal_dict['station_info'][station]['polarity']
-        ii = index // n_cols
-        jj = index % n_cols
-        ax = fig.add_subplot(gs[ii, jj])
-        x_wide = main_focal_dict['station_info'][station]['visual_time']
-        y_wide = main_focal_dict['station_info'][station]['visual_sac']
-        ax.plot(x_wide, y_wide, color='k', lw=lw, zorder=2)
-        ax.set_xlim(0, visual_window * 2)
-        ax.grid(True, alpha=0.7)
-        x = main_focal_dict['station_info'][station]['train_time']
-        y = main_focal_dict['station_info'][station]['train_sac']
-        # TODO: customize the line length according to the y range.
-
-        ax.plot(x, y, color='r', lw=lw, zorder=3)
-        if station in comp_focal_station_list:
-            comp_polarity = comp_focal_dict['station_info'][station]['polarity']
-            if polarity != comp_polarity:
-                diff_counter += 1
-                ax.set_title(
-                    f'{station}(AQ: {polarity}, CWA: {comp_polarity})',
-                    fontsize=20,
-                    color='r',
-                )
-            else:
-                common_counter += 1
-                ax.set_title(
-                    f'{station}(AQ: {polarity}, CWA: {comp_polarity})',
-                    fontsize=20,
-                    color='g',
-                )
-        else:
-            ax.set_title(f'{station}({polarity})', fontsize=7)
-        ax.set_xticklabels([])  # Remove the tick labels but keep the ticks
-        ax.set_yticklabels([])  # Remove the tick labels but keep the ticks
-        ax.xaxis.set_major_locator(MultipleLocator(0.5))
-        ax.xaxis.set_minor_locator(MultipleLocator(0.1))
-        # ax.scatter(
-        #     x[int(train_window * 100)],
-        #     y[int(train_window * 100)],
-        #     color='c',
-        #     marker='o',
-        #     s=point_size,
-        # )
-        y_offset = 0.2 * (abs(max(y_wide)) + abs(min(y_wide)))
-        ax.vlines(
-            x=x[int(train_window * 100)],
-            ymin=y[int(train_window * 100)] - y_offset,
-            ymax=y[int(train_window * 100)] + y_offset,
-            color='c',
-            linewidth=arrival_lw,
-            zorder=4,
-        )
-    # all_counter = int(common_counter) + int(diff_counter)
-    # fig.text(
-    #     0.9,
-    #     0.05,
-    #     f'common polarity: {common_counter} / {all_counter}\ndiff polarity: {diff_counter} / {all_counter}',
-    #     fontsize=35,
-    # )
-
-
-# plotter
-def plot_beachball_info(
-    focal_dict_list: list[dict], name_list: list[str], fig=None, gs=None
-):
-    if fig is None:
-        fig = plt.figure(figsize=(36, 20))
-        gs = GridSpec(10, 18, left=0, right=0.9, top=0.95, bottom=0.42, wspace=0.1)
-    if len(focal_dict_list) == 2:
-        ax1 = fig.add_subplot(gs[:5, 5:9])  # focal axes-upper part
-        ax2 = fig.add_subplot(gs[5:, 5:9])
-        ax_list = [ax1, ax2]
-        color_list = ['r', 'b']
-    else:
-        ax_list = [fig.add_subplot(gs[:5, 5:9])]
-        color_list = ['r']
-    for focal_dict, name, ax, color in zip(
-        focal_dict_list, name_list, ax_list, color_list
-    ):
-        get_beach(focal_dict=focal_dict, source=name, ax=ax, color=color)
-    # plt.tight_layout()
-    # plt.savefig(f"/home/patrick/Work/AutoQuake/test_format/focal/focal_event_{event_index}.png", bbox_inches='tight', dpi=300)
+#     ax.text(
+#         1.2,
+#         -0.5,
+#         f"{source}\nQuality index: {focal_dict['quality_index']}\nnum of station: {focal_dict['num_of_polarity']}\n\
+# Strike: {focal_dict['focal_plane']['strike']}\nDip: {focal_dict['focal_plane']['dip']}\n\
+# Rake: {focal_dict['focal_plane']['rake']}",
+#         fontsize=20,
+#     )
 
 
 def get_beachball_check(
     i: int,
-    analyze_year: str,
     main_common: pd.DataFrame,
     comp_common: pd.DataFrame,
     main_polarity: Path,
     comp_polarity: Path,
     source_list: list,  # [0] == main
     fig_dir: Path,
+    sac_parent_dir: Path,
+    h5_parent_dir: Path,
 ):
+    logging.info(f'Event index: {i}')
     main_focal_dict = find_compared_gafocal_polarity(
-        gafocal_df=main_common,
+        df_gafocal=main_common,
         polarity_dout=main_polarity,
-        analyze_year=analyze_year,
         event_index=i,
         use_gamma=True,
+        sac_parent_dir=sac_parent_dir,
+        h5_parent_dir=h5_parent_dir,
     )
-
     comp_focal_dict = find_compared_gafocal_polarity(
-        gafocal_df=comp_common,
+        df_gafocal=comp_common,
         polarity_dout=comp_polarity,
-        analyze_year=analyze_year,
         event_index=i,
         use_gamma=False,
+        get_waveform=False,
     )
-    fig = plt.figure(figsize=(36, 20))
+    fig_name = f"Event_{i}_{comp_focal_dict['utc_time'].replace('-','_').replace(':', '_')}_map.png"
+    if (fig_dir / fig_name).exists():
+        logging.info(f'Event_{i} beachball already done')
+        return
+    fig = plt.figure(figsize=(32, 18))
+    gs1 = GridSpec(10, 18, left=0.65, right=0.9, top=0.95, bottom=0.05, wspace=0.1)
     plot_beachball_info(
         focal_dict_list=[main_focal_dict, comp_focal_dict],
         name_list=source_list,
         fig=fig,
+        gs=gs1,
     )
+    logging.info(f'Event_{i} beachball done')
     plot_polarity_waveform(
         main_focal_dict=main_focal_dict, comp_focal_dict=comp_focal_dict, fig=fig
     )
+    logging.info(f'Event_{i} polarity waveform')
     plt.tight_layout()
-    plt.savefig(f'{fig_dir}/focal_event_{i}.png', bbox_inches='tight', dpi=300)
+    plt.savefig(
+        fig_dir / fig_name,
+        bbox_inches='tight',
+        dpi=300,
+    )
 
 
 def plot_beachball_check(
-    analyze_year: str,
     main_common: pd.DataFrame,
     comp_common: pd.DataFrame,
     main_polarity: Path,
-    main_polarity_index: Path,
     comp_polarity: Path,
-    comp_polarity_index: Path,
-    source_list: list,  # [0] == main
+    source_list: list,
+    fig_dir: Path,
+    sac_parent_dir: Path,
+    h5_parent_dir: Path,
+    processes=5,
 ):
     comp_index_list = list(main_common['comp_index'])
-    with mp.Pool(processes=20) as pool:
+    with mp.Pool(processes=processes) as pool:
         pool.starmap(
             get_beachball_check,
             [
                 (
                     i,
-                    analyze_year,
                     main_common,
                     comp_common,
                     main_polarity,
-                    main_polarity_index,
                     comp_polarity,
-                    comp_polarity_index,
                     source_list,
+                    fig_dir,
+                    sac_parent_dir,
+                    h5_parent_dir,
                 )
                 for i in comp_index_list
             ],

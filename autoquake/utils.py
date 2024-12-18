@@ -5,23 +5,21 @@ import pandas as pd
 from autoquake.visualization._plot_base import utc_to_timestamp
 
 
-def degree_trans(part: str):
-    """Transform degree-minute-second to decimal degrees."""
-    if len(part) == 7:
-        deg = int(part[:2])
-        if part[2:4] == '  ':
-            value = 0
-        else:
-            value = int(part[2:4]) / 60
-        dig = value + int(part[5:]) / 3600
-    else:
-        deg = int(part[:3])
-        if part[3:5] == '  ':
-            value = 0
-        else:
-            value = int(part[3:5]) / 60
-        dig = value + int(part[6:]) / 3600
-    return deg + dig
+def dmm_trans(coord: str):
+    """
+    Convert degree and minute format (e.g., '2523.47') to decimal degrees.
+    :param coord: Coordinate in degree and minute format as a string.
+    :return: Decimal degrees as a float.
+    """
+    try:
+        # Split into degrees and minutes
+        degrees = int(coord[:-5])  # Extract the degree part (all but last 5 chars)
+        minutes = float(coord[-5:])  # Extract the minute part (last 5 chars)
+
+        # Convert to decimal degrees
+        return degrees + (minutes / 60)
+    except (ValueError, IndexError):
+        raise ValueError(f'Invalid coordinate format: {coord}')
 
 
 def comparing_picks(df_gamma_picks, time_array, i, tol=3):

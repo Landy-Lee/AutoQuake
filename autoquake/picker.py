@@ -207,10 +207,7 @@ class PhaseNet:
         self.args_list = []
         self.date_list = self.date_range()
         for date in self.date_list:
-            if self.model == 'phasenet_das':
-                data_path = self.data_parent_dir / f'{date}_hdf5'
-            else:
-                data_path = self.data_parent_dir / date
+            data_path = next(self.data_parent_dir.glob(f'*{date}*'))
             args = argparse.Namespace(
                 data_path=str(data_path),
                 data_list=self._check_data_list(self.data_list, data_path),

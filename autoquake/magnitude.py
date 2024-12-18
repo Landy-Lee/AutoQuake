@@ -11,7 +11,7 @@ import pandas as pd
 from obspy import Stream, UTCDateTime, read
 from obspy.io.sac.sacpz import attach_paz
 
-from .utils import degree_trans
+from .utils import dmm_trans
 
 pre_filt = (0.1, 0.5, 30, 35)
 
@@ -241,8 +241,8 @@ class Magnitude:
                 utctime = f'{year:4}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:05.2f}'
                 lat_part = line[19:26].strip()
                 lon_part = line[26:34].strip()
-                event_lon = round(degree_trans(lon_part), 3)
-                event_lat = round(degree_trans(lat_part), 3)
+                event_lon = round(dmm_trans(lon_part), 3)
+                event_lat = round(dmm_trans(lat_part), 3)
                 depth = line[34:40].strip()
                 mag_event_list.append(
                     [
@@ -436,6 +436,8 @@ class Magnitude:
                 st = self._merge_latest(station, comp, t1, t2, tt1=tt1, tt2=tt2)
             except Exception as e:
                 logging.info(f'Error exist during process {station}: {e}')
+                logging.info(f'Error_time: around {tt1}')
+                continue
             pz_path = list(self.pz_path.glob(f'*{station}*{comp}*'))[0]
             attach_paz(tr=st[0], paz_file=str(pz_path))
             st.trim(starttime=tt1, endtime=tt2)  # cut longer for simulate
@@ -450,7 +452,7 @@ class Magnitude:
 
         return response_dict
 
-    def _calulate_mag(self, response_dict: dict, dist: float, depth: float) -> float:
+    def _calculate_mag(self, response_dict: dict, dist: float, depth: float) -> float:
         """
         Using R (dist**2 + depth**2) to correct and estimate the magnitude.
         """
@@ -510,16 +512,18 @@ class Magnitude:
                 )
 
                 actual_depth = depth + df_sta_picks['elevation'].iloc[0]
-                if response_dict is not None:
-                    sta_mag = self._calulate_mag(
+                if response_dict:
+                    sta_mag = self._calculate_mag(
                         response_dict=response_dict,
                         dist=float(df_sta_picks['dist'].iloc[0]),
                         depth=actual_depth,
                     )
-
                     station_num += 1
                     df_picks.loc[df_picks['station'] == station, 'magnitude'] = sta_mag
                     sum_mag += sta_mag
+                else:
+                    logging.info(f'{station} has no response_dict: {response_dict}')
+                    continue
             else:
                 hor_comp_error_dict[station] = comp_list
                 continue
