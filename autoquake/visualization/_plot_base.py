@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import cartopy.crs as ccrs
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
@@ -418,13 +419,14 @@ def preprocess_gamma_csv(
 
 
 def _preprocess_phasenet_csv(
-    phasenet_picks: Path, get_station=lambda x: str(x).split('.')[1]
+    phasenet_picks: Path, starttime: str, endtime: str, get_station=lambda x: str(x).split('.')[1]
 ) -> pd.DataFrame:
     """## Preprocess the phasenet_csv
     Using get_station to retrieve the station name in station_id column.
     """
     df_all_picks = pd.read_csv(phasenet_picks)
     df_all_picks['phase_time'] = pd.to_datetime(df_all_picks['phase_time'])
+    df_all_picks = df_all_picks[(df_all_picks['phase_time']>=pd.Timestamp(starttime)) & (df_all_picks['phase_time']<=pd.Timestamp(endtime))]
     df_all_picks['total_seconds'] = df_all_picks['phase_time'].apply(get_total_seconds)
     # df_all_picks['system'] = df_all_picks['station_id'].apply(
     #     lambda x: str(x).split('.')[0]
@@ -1576,7 +1578,7 @@ def _plot_seis(
                 zorder=1,
             )
             ax.text(
-                sac_dict[sta]['time'][-1] + 1,
+                61,  # sac_dict[sta]['time'][-1] + 1,
                 sac_dict[sta]['distance'],
                 sta,
                 fontsize=4,
@@ -1592,7 +1594,7 @@ def _plot_seis(
                 zorder=1,
             )
             ax.text(
-                sac_dict[sta]['time'][-1] + 1,
+                61,  # sac_dict[sta]['time'][-1] + 1,
                 sac_dict[sta]['distance'],
                 sta,
                 fontsize=4,
@@ -1609,7 +1611,7 @@ def _plot_seis(
     ax.scatter(
         df_phasenet_picks[df_phasenet_picks['phase_type'] == 'S']['x'],
         df_phasenet_picks[df_phasenet_picks['phase_type'] == 'S']['y'],
-        color='c',
+        color='blue',
         s=1,
         zorder=2,
     )
@@ -1640,11 +1642,12 @@ def _plot_seis(
             df_gamma_picks[df_gamma_picks['phase_type'] == 'S']['y'].to_numpy()
             + bar_length,
         ],
-        color='c',
+        color='blue',
         linewidth=0.7,
         zorder=2,
     )
-    ax.set_xlim(0, 90)
+    # ax.set_xlim(0, 90)
+    ax.set_xlim(30, 60)
     ax.xaxis.set_minor_locator(MultipleLocator(5))
     ax.yaxis.set_minor_locator(MultipleLocator(10))
     ax.tick_params(axis='both', which='major', length=3, width=1, labelsize=5)
@@ -1666,6 +1669,7 @@ def _add_das_picks(
     """
     We only consider the scale across the day.
     """
+    print('_add_das_picks...')
     start_ymd, start_idx, start_sec = _process_midas_scenario(
         starttime, interval=interval
     )
@@ -1678,6 +1682,7 @@ def _add_das_picks(
         window.append(next_window)
         same_index = False
     try:
+        print('loading h5...')
         all_data = []
         for win in window:
             ymd = win.split(':')[0]
@@ -1727,11 +1732,18 @@ def _add_das_picks(
         main_ax.set_ylim(
             interval + end_sec, start_sec
         )  # concat later or not would not influence the time.
+        ticks=np.linspace(interval + end_sec, start_sec, 10)
+        main_ax.set_yticks(ticks=ticks, labels=ticks - start_sec)
     else:
         main_ax.set_ylim(end_sec, start_sec)
+        ticks=np.linspace(end_sec, start_sec, 10)
+        main_ax.set_yticks(ticks=ticks, labels=ticks - start_sec)
+    print('scatter plot...')
     if df_phasenet_picks is not None:
         df_phasenet_picks = _find_phasenet_das_pick(
-            starttime=starttime, endtime=endtime, df_picks=df_phasenet_picks
+            starttime=starttime, endtime=endtime,
+            df_picks=df_phasenet_picks, das_time_interval=interval,
+            dt=dt, dx=dx
         )
         main_ax.scatter(
             df_phasenet_picks[df_phasenet_picks['phase_type'] == 'P']['x'],
@@ -1795,11 +1807,12 @@ def _add_das_picks(
 
 
 # ===== get function =====
-def get_mapview(region: list, ax: GeoAxes, title='Map'):
+def get_mapview(region: list, ax: GeoAxes, title='Map', use_fault=True):
     """## Plotting the basic map.
 
     Notice here, the ax should be a GeoAxes! A subclass of `matplotlib.axes.Axes`.
     """
+    tw_coast = Path(__file__).parent / 'geo_map' / 'tw_coast.txt'
     topo = (
         pygmt.datasets.load_earth_relief(resolution='15s', region=region).to_numpy()
         / 1e3
@@ -1821,7 +1834,10 @@ def get_mapview(region: list, ax: GeoAxes, title='Map'):
         rasterized=True,
     )
     # cartopy setting
-    ax.coastlines()
+    # ax.coastlines()
+    add_tw_coast(ax, tw_coast)
+    if use_fault:
+        add_fault(ax)
     ax.set_extent(region)
     ax.set_title(title, fontsize=12)
     gl = ax.gridlines(draw_labels=True)
@@ -1839,6 +1855,9 @@ def get_phasenet_das(
     prob_ax: Axes | None = None,
     plot_prob=True,
     get_station=lambda x: x,
+    pretime=-30,
+    posttime=60,
+    interval=300
 ):
     """## Get PhaseNet DAS result.
     If you have no idea how to determine the start and end time, you can give an
@@ -1850,12 +1869,14 @@ def get_phasenet_das(
         - 2a. only plot main
         - 2b. plot main and prob axes
     """
+    print('preprocessing...')
     df_phasenet = _preprocess_phasenet_csv(
-        phasenet_picks=picks, get_station=get_station
+        phasenet_picks=picks, get_station=get_station, starttime=starttime, endtime=endtime
     )
+    print('preprocessing done!')
     if event_utc_time is not None:
-        starttime = add_on_utc_time(event_utc_time, -30)
-        endtime = add_on_utc_time(event_utc_time, 60)
+        starttime = add_on_utc_time(event_utc_time, pretime)
+        endtime = add_on_utc_time(event_utc_time, posttime)
 
     if starttime is not None and endtime is not None:
         # axes judge
@@ -1881,6 +1902,7 @@ def get_phasenet_das(
             prob_ax=prob_ax,
             h5_parent_dir=hdf5_parent_dir,
             df_phasenet_picks=df_phasenet,
+            interval=interval
         )
     else:
         raise ValueError(
@@ -1941,6 +1963,7 @@ def plot_station(
     fontsize=10,
     text_dist=0.01,
     zorder=4,
+    station_mask=station_mask,
 ):
     """
     plot the station distribution on map.
@@ -2154,3 +2177,116 @@ def quick_indexing(
         (df_picks['event_index'].isin(gamma_list)) & (df_picks['phase_type'] == 'P')
     ]
     return df_picks
+
+
+def add_fault(
+    ax: Axes, color='r', fault_txt: Path | None = None, transform=ccrs.PlateCarree()
+):
+    """
+    Adding the fault line on the map.
+    """
+    if fault_txt is None:
+        fault_txt = Path(__file__).parent / 'geo_map' / 'hualien_structure.txt'
+    with open(fault_txt) as f:
+        lines = f.readlines()
+    fault_dir = {}
+    for line in lines:
+        if line[:1] == '#':
+            fault_name = line.split('|')[1]
+            fault_dir[fault_name] = {'longitude': [], 'latitude': []}
+        else:
+            lon, lat = map(float, line.split())
+            fault_dir[fault_name]['longitude'].append(lon)
+            fault_dir[fault_name]['latitude'].append(lat)
+
+    for fault_name in fault_dir.keys():
+        ax.plot(
+            fault_dir[fault_name]['longitude'],
+            fault_dir[fault_name]['latitude'],
+            color=color,
+            linewidth=1,
+            transform=transform,
+            label=fault_name,
+        )
+
+
+def add_beachballs(gafocal_txt: Path, ax, on='mapview'):
+    """
+    1. input the gafocal_txt file
+    2. plot the beachball on the ax
+    3. on: mapview (lon, lat), longitude (lon, depth), latitude (depth, lat)
+    """
+    df_gafocal, _ = check_format(gafocal_txt)
+    for i in ['strike', 'dip', 'rake']:
+        df_gafocal[i] = df_gafocal[i].map(lambda x: int(x.split('+')[0]))
+    for _, row in df_gafocal.iterrows():
+        lon, lat, depth = row['longitude'], row['latitude'], row['depth_km']
+        position_map = {
+            'mapview': (lon, lat),
+            'longitude': (lon, depth),
+            'latitude': (depth, lat),
+        }
+        mt = pmt.MomentTensor(
+            strike=row['strike'],
+            dip=row['dip'],
+            rake=row['rake'],
+        )
+        beachball.plot_beachball_mpl(
+            mt,
+            ax,
+            size=20,
+            beachball_type='full',
+            position=position_map[on],
+            linewidth=1,
+            color_t=mpl_color('silver'),
+            zorder=6,
+        )
+
+
+def add_single_beachball(ax, strike: int, dip: int, rake: int, x, y, size=20, zorder=6):
+    """
+    Adding single beachball on the map
+    """
+    mt = pmt.MomentTensor(
+        strike=strike,
+        dip=dip,
+        rake=rake,
+    )
+    beachball.plot_beachball_mpl(
+        mt,
+        ax,
+        size=size,
+        beachball_type='full',
+        position=(x, y),
+        linewidth=1,
+        color_t=mpl_color('silver'),
+        zorder=zorder,
+    )
+
+
+def add_tw_coast(ax: Axes, tw_coast: Path):
+    with open(tw_coast) as f:
+        lines = f.readlines()
+    for line in lines:
+        if line[:1] == '>':
+            try:
+                ax.plot(
+                    lon_list,
+                    lat_list,
+                    'k',
+                    transform=ccrs.PlateCarree(),
+                    linewidth=1,
+                    zorder=5,
+                )
+                lon_list, lat_list = [], []
+            except Exception as e:
+                print(f'we want to pass more >, {e}')
+        else:
+            lon, lat = map(float, line.strip().split())
+            try:
+                lon_list.append(lon)
+                lat_list.append(lat)
+            except Exception:
+                lon_list, lat_list = [], []
+                lon_list.append(lon)
+                lat_list.append(lat)
