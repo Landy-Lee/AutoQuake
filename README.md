@@ -31,9 +31,9 @@ If you only want to use the package without contributing to the codebase, follow
    cd AutoQuake
    ./init_submodules.sh # use sh to execute the script if powershell.
    ```
-2. **Install dependecies**: Follow the installation instructions in the [Installation](#installation) section.
-**Use the Package**: Follow the instructions in the Usage section to start generating earthquake catalogs.
-**Report Issues**: If you encounter any problems or have suggestions for improvement, please [open or report an issue](https://github.com/IES-ESLab/AutoQuake/issues). Describe the problem in detail to help us address it quickly.
+2. **Install dependecies**: Follow the installation instructions in the [Installation](#installation) section.       
+**Use the Package**: Follow the instructions in the Usage section to start generating earthquake catalogs.       
+**Report Issues**: If you encounter any problems or have suggestions for improvement, please [open or report an issue](https://github.com/IES-ESLab/AutoQuake/issues). Describe the problem in detail to help us address it quickly.        
 **Pull Updates**: Regularly pull updates from the original repository to keep your local copy synchronized and avoid conflicts.
    ```bash
    git pull origin main
@@ -71,7 +71,7 @@ If you’re interested in contributing to the development of this project, follo
    git pull upstream main
    ```
 **Open a Pull Request**: Once your changes are pushed, go to the original repository on GitHub and open a Pull Request from your branch to the dev branch of the main repository.
-Read to our [Contributing](#contributing) section for more details on how to contribute to this project.
+Read to our [Contributing](#contributing) section for more details on how to contribute to this project.       
 **Report Issues**: You can help resolving the issues.    
 ## Installation
 This package supports both `requirements.txt` and `env.yml` for dependency management. Choose one of the following installation methods:    
