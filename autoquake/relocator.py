@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -48,6 +49,7 @@ class H3DD:
         constrain_factor=0.0,
         joint_inv_with_single_event_method=1,
         consider_elevation=0,
+        save_reorder=False,
     ):
         """## Using 3D model for hypoDD.
 
@@ -89,6 +91,7 @@ class H3DD:
         self.constrain_factor = constrain_factor
         self.joint_inv_with_single_event_method = joint_inv_with_single_event_method
         self.consider_elevation = consider_elevation
+        self.save_reorder = save_reorder
         self.reorder_event = self.gamma_event.parent / 'gamma_reorder_event.csv'
         self.dout = self.h3dd_dir / f'{event_name}.dat_ch.dout'
         self.hout = self.h3dd_dir / f'{event_name}.dat_ch.hout'
@@ -162,7 +165,8 @@ class H3DD:
 
         if gamma_reorder_event is None:
             gamma_reorder_event = self.gamma_event.parent / 'gamma_reorder_event.csv'
-        df_sort.to_csv(gamma_reorder_event, index=False)
+        if self.save_reorder:
+            df_sort.to_csv(gamma_reorder_event, index=False)
         return df_sort
 
     def _gamma_preprocess(
