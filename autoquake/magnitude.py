@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from obspy import Stream, UTCDateTime, read
 from obspy.io.sac.sacpz import attach_paz
-
+from concurrent.futures import ThreadPoolExecutor
 from .utils import dmm_trans
 
 pre_filt = (0.1, 0.5, 30, 35)
@@ -162,16 +162,19 @@ class Magnitude:
         stream = stream.merge(fill_value='latest')
         return stream
 
+    def process_sac(self, sac_path):
+        st = read(sac_path)
+        return st[0].get_id().split('.')[-1]    
+
     def _check_ymd_comp(self, df: pd.DataFrame, station: str) -> tuple[str, set[str]]:
         time_string = df['phase_time'].iloc[0]
         ymd = utc_get_ymd(time_string)
         sac_path_list = list((self.sac_parent_dir / ymd).glob(f'*{station}*'))
-        comp_list = [
-            sac_path.stem.split('.')[3]
-            for sac_path in sac_path_list
-            if sac_path.stem.split('.')[3][-1] != 'Z'
-        ]
-        comp_list = set(comp_list)
+
+        with ThreadPoolExecutor() as executor:  # Use ThreadPoolExecutor for I/O-bound tasks
+            comp_list = set(executor.map(self.process_sac, sac_path_list))
+
+        comp_list = set(i for i in comp_list if i[-1] != 'Z')
         if len(comp_list) <= 2:
             return ymd, comp_list
         elif len(comp_list) > 2:
@@ -198,15 +201,15 @@ class Magnitude:
             'year',
             'month',
             'day',
-            'utctime',
+            'time',
             'total_seconds',
             'longitude',
             'latitude',
-            'depth',
+            'depth_km',
             'h3dd_event_index',
         ]
         mag_picks_header = [
-            'station',
+            'station_id',
             'phase_time',
             'total_seconds',
             'phase_type',
@@ -438,7 +441,11 @@ class Magnitude:
                 logging.info(f'Error exist during process {station}: {e}')
                 logging.info(f'Error_time: around {tt1}')
                 continue
-            pz_path = list(self.pz_path.glob(f'*{station}*{comp}*'))[0]
+            try:
+                pz_path = list(self.pz_path.glob(f'*{station}*{comp}*'))[0]
+            except IndexError as e:
+                logging.info(f'{station} has no pz file: {e}')
+                continue
             attach_paz(tr=st[0], paz_file=str(pz_path))
             st.trim(starttime=tt1, endtime=tt2)  # cut longer for simulate
             st.simulate(paz_remove='self', paz_simulate=wa_simulate, pre_filt=pre_filt)
@@ -476,7 +483,7 @@ class Magnitude:
         df_event = self.df_h3dd_events[
             self.df_h3dd_events['h3dd_event_index'] == event_index
         ].copy()
-        depth = float(df_event['depth'].iloc[0])
+        depth = float(df_event['depth_km'].iloc[0])
         df_picks = self.df_h3dd_picks[
             (self.df_h3dd_picks['h3dd_event_index'] == event_index)
         ].copy()
@@ -485,10 +492,10 @@ class Magnitude:
         sum_mag = 0
         code_error_set = set()
         hor_comp_error_dict = {}
-        for station in set(df_picks['station']):
+        for station in set(df_picks['station_id']):
             if station[1].isdigit():
                 continue
-            df_sta_picks = df_picks[df_picks['station'] == station].copy()
+            df_sta_picks = df_picks[df_picks['station_id'] == station].copy()
 
             t1, t2, tt1, tt2 = self._calculate_time_window(df_sta_picks)
             # TODO: check that all time is in the same day.
@@ -513,13 +520,16 @@ class Magnitude:
 
                 actual_depth = depth + df_sta_picks['elevation'].iloc[0]
                 if response_dict:
+                    logging.info(f'Event: {event_index}, calculating mag for {station}')
                     sta_mag = self._calculate_mag(
                         response_dict=response_dict,
                         dist=float(df_sta_picks['dist'].iloc[0]),
                         depth=actual_depth,
                     )
                     station_num += 1
-                    df_picks.loc[df_picks['station'] == station, 'magnitude'] = sta_mag
+                    df_picks.loc[df_picks['station_id'] == station, 'magnitude'] = (
+                        sta_mag
+                    )
                     sum_mag += sta_mag
                 else:
                     logging.info(f'{station} has no response_dict: {response_dict}')
@@ -527,8 +537,10 @@ class Magnitude:
             else:
                 hor_comp_error_dict[station] = comp_list
                 continue
-        logging.info(f'code == 0 stations: {code_error_set}')
-        logging.info(f'horizontal elements not enough stations: {hor_comp_error_dict}')
+        logging.info(f'code == 0 stations for event{event_index}: {code_error_set}')
+        logging.info(
+            f'horizontal elements not enough stations for event{event_index}: {hor_comp_error_dict}'
+        )
         if station_num > 0:
             sum_mag /= station_num
             df_event['magnitude'] = sum_mag
