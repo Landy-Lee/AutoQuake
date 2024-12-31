@@ -409,7 +409,7 @@ class H3DD:
                     sta_mag = round(
                         df_mag_pick[
                             (df_mag_pick['h3dd_event_index'] == h3dd_event_index)
-                            & (df_mag_pick['station'] == station)
+                            & (df_mag_pick['station_id'] == station)
                         ]['magnitude'].iloc[0],
                         2,
                     )
