@@ -2207,6 +2207,7 @@ def add_fault(
             linewidth=1,
             transform=transform,
             label=fault_name,
+            zorder=10
         )
 
 

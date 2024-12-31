@@ -4,9 +4,11 @@
 /test/seis
 /test/das
 /test_agu
-/test
+/test_fig_dir
 /Seis_20240401_20240417
-
+/Data_fetching
+/geo_map
+/autoquake/visualization/geo_map
 # output and some text
 
 gmt.history
@@ -27,6 +29,13 @@ gmt.history
 test*.py
 play.py
 plot_design.py
+plotter.py
+pol_test.py
+retrieve_pol.py
+tutorial.ipynb
+aso.py
+focal_test.py
+plot.ipynb
 
 testset*
 # H3DD
@@ -37,8 +46,10 @@ testset*
 
 # GAfocal
 /GAfocal/results.txt
-
+/GAfocal/psplots/output/
 # result_dir
 /gamma_result
 /result_test
-
+/H3DD/previous
+/H3DD/cutoff_test
+/H3DD/h3dd_twice

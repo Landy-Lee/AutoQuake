@@ -5,6 +5,7 @@ import logging
 
 # from obspy.imaging.beachball import beach
 import multiprocessing as mp
+import string
 from functools import partial
 
 # import calendar
@@ -13,13 +14,17 @@ from pathlib import Path
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import matplotlib.colors as mcolors
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import numpy as np
 import pandas as pd
 from cartopy.mpl.geoaxes import GeoAxes
 from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
 from matplotlib.ticker import MultipleLocator
+from pyproj import Geod
 
 # from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
 # from collections import defaultdict
@@ -104,7 +109,7 @@ def plot_asso_map(
         get_mapview(
             main_region,
             main_ax,
-            title=f"{event_dict['gamma']['event_time']}\nLat: {event_dict['gamma']['event_lat']} Lon: {event_dict['gamma']['event_lon']} depth: {event_dict['gamma']['event_depth']}",
+            title=f"GDMS: {event_dict['h3dd']['event_time']}\nLat: {event_dict['h3dd']['event_lat']} Lon: {event_dict['h3dd']['event_lon']} depth: {event_dict['h3dd']['event_depth']}",
         )
         main_ax.scatter(
             x=df_seis_station['longitude'],
@@ -237,6 +242,8 @@ def plot_asso(
     station_mask=station_mask,
     seis_region=None,
     das_region=None,
+    pretime=-30,
+    posttime=60,
 ):
     """
     ## Plotting the gamma and h3dd info.
@@ -296,7 +303,7 @@ def plot_asso(
     # retrieving data
     if sac_parent_dir is not None:
         sac_dict = find_sac_data(
-            event_time=event_dict[status]['event_time'],
+            event_time=event_dict['gamma']['event_time'],
             date=event_dict['gamma']['date'],
             event_point=event_dict[status]['event_point'],
             station=station,
@@ -324,8 +331,8 @@ def plot_asso(
         das_map_ax = None
         das_waveform_ax = None
 
-    starttime = add_on_utc_time(df_event['time'].iloc[0], -30)
-    endtime = add_on_utc_time(df_event['time'].iloc[0], 60)
+    starttime = add_on_utc_time(df_event['time'].iloc[0], pretime)
+    endtime = add_on_utc_time(df_event['time'].iloc[0], posttime)
 
     df_das_phasenet_picks = _find_phasenet_das_pick(
         starttime=starttime,
@@ -343,7 +350,7 @@ def plot_asso(
     df_seis_gamma_picks, df_das_gamma_picks = find_gamma_pick(
         df_gamma_picks=df_event_picks,
         sac_dict=sac_dict,
-        event_total_seconds=event_dict[status]['event_total_seconds'],
+        event_total_seconds=event_dict['gamma']['event_total_seconds'],
         station_mask=station_mask,
     )
     plot_waveform_check(
@@ -961,7 +968,7 @@ def plot_mapview(
                 alpha=0.5,
                 label=f'{label_map[event_type]}: {num}',
                 rasterized=True,
-                zorder=3 + abs(int(event_type) - 4),
+                zorder=3 + abs(int(event_type)),
             )
             if plot_event_name:
                 for _, row in group.iterrows():
@@ -1105,6 +1112,337 @@ def plot_mapview(
     plt.tight_layout()
     if savefig and fig_dir is not None:
         plt.savefig(fig_dir / f'{title}.png', dpi=300, bbox_inches='tight')
+
+
+def plot_mapview_temp(
+    station: Path,
+    catalog: pd.DataFrame,
+    catalog_filter_: dict | None = None,
+    title='Event distribution',
+    eq_list=[],
+    main_eq_size=10,
+    plot_station_name=True,
+    plot_event_name=False,
+    # station_mask=station_mask,
+    savefig=True,
+    fig_dir: Path | None = None,
+    plot_profile=True,
+    h3dd_mode=False,
+    prefix='',
+    savename='',
+    temporal=False,
+    plot_profile_line=False,
+    center=()
+):
+    """
+    catalog should at least contains the lon and lat.
+
+    """
+    # plot setting
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(12, 14),
+        gridspec_kw={'width_ratios': [3, 1], 'height_ratios': [3, 1]},
+    )
+    geo_ax = fig.add_subplot(2, 2, 1, projection=ccrs.PlateCarree())
+    # fig, geo_ax = plt.subplots(
+    #     1, 1, figsize=(12, 14), subplot_kw={'projection': ccrs.PlateCarree()}
+    # )
+
+    # sub_ax = fig.add_subplot(4, 4, 1, projection=ccrs.PlateCarree())
+
+    # base_map
+    if catalog_filter_ is None:
+        region = [
+            catalog['longitude'].min() - 0.2,
+            catalog['longitude'].max() + 0.2,
+            catalog['latitude'].min() - 0.2,
+            catalog['latitude'].max() + 0.2,
+        ]
+    else:
+        region = [
+            catalog_filter_['min_lon'],
+            catalog_filter_['max_lon'],
+            catalog_filter_['min_lat'],
+            catalog_filter_['max_lat'],
+        ]
+    get_mapview(region=region, ax=geo_ax, title=title)
+    # ax setting
+    geo_ax.set_xlim(region[0], region[1])
+    geo_ax.set_ylim(region[2], region[3])
+    # trim the catalog
+    catalog = catalog_filter(
+        catalog_df=catalog, h3dd_mode=h3dd_mode, catalog_range=catalog_filter_
+    )
+    # get the size corresponding to magnitude
+    catalog.loc[:, 'size'] = catalog['magnitude'].apply(_get_size)
+    # station
+    df_station = pd.read_csv(station)
+    # print(
+    #     'Geo Axes Patch Extent:',
+    #     geo_ax.get_window_extent(renderer=fig.canvas.get_renderer()),
+    # )
+    plot_station(
+        df_station=df_station,
+        geo_ax=geo_ax,
+        region=region,
+        plot_station_name=plot_station_name,
+        text_dist=0.005,
+    )
+    manual_elements = [
+        Line2D(
+            [0],
+            [0],
+            marker='^',
+            color='w',
+            label='Seismometer',
+            markersize=7,
+            markerfacecolor='c',
+            markeredgecolor='k',
+        ),
+    ]
+    # add all events
+    event_num = len(catalog)
+    if h3dd_mode:
+        prefix = 'h3dd_'
+    if 'event_type' in catalog.columns:
+        # This part we want to visualize the distribution of event_type.
+        color_map = {
+            0: 'green',
+            1: 'purple',
+            2: 'black',
+            3: 'black',
+            4: 'orange',
+            5: 'blue',
+            6: 'red',
+        }
+        label_map = {
+            0: 'After Main shock (2024-04-02T23:58:10)',
+            1: 'Before Main shock (2024-04-02T23:58:10)',
+            2: '2018 Hualien Earthquake',
+            3: 'AutoQuake Catalog',
+            4: 'GDMS Catalog',
+            5: 'GDMS Catalog',
+            6: 'Associated event',
+        }
+
+        for event_type, group in catalog.groupby('event_type'):
+            num = len(group)
+            group = group.sort_values(by='size', ascending=True)
+            geo_ax.scatter(
+                group[f'{prefix}longitude'],
+                group[f'{prefix}latitude'],
+                s=group['size'],
+                c=color_map[event_type],
+                alpha=0.5,
+                label=f'{label_map[event_type]}: {num}',
+                rasterized=True,
+                zorder=3 + abs(int(event_type) - 4),
+            )
+            if plot_event_name:
+                for _, row in group.iterrows():
+                    geo_ax.text(
+                        x=row[f'{prefix}longitude'],
+                        y=row[f'{prefix}latitude'],
+                        s=row['event_index'],
+                    )
+            if plot_profile:
+                axes[0, 1].scatter(
+                    group[f'{prefix}depth_km'],
+                    group[f'{prefix}latitude'],
+                    s=group['size'],
+                    c=color_map[event_type],
+                    alpha=0.5,
+                    # label=label_map[event_type],
+                    rasterized=True,
+                    zorder=3 + abs(int(event_type) - 4),
+                )
+                for eq in eq_list:
+                    _add_epicenter(
+                        x=eq[2],
+                        y=eq[1],
+                        ax=axes[0, 1],
+                        size=main_eq_size,
+                        alpha=0.7,
+                        color=eq[4],
+                    )
+                axes[1, 0].scatter(
+                    group[f'{prefix}longitude'],
+                    group[f'{prefix}depth_km'],
+                    s=group['size'],
+                    c=color_map[event_type],
+                    alpha=0.5,
+                    # label=label_map[event_type],
+                    rasterized=True,
+                    zorder=3 + abs(int(event_type) - 4),
+                )
+                for eq in eq_list:
+                    _add_epicenter(
+                        x=eq[0],
+                        y=eq[2],
+                        ax=axes[1, 0],
+                        size=main_eq_size,
+                        alpha=0.7,
+                        color=eq[4],
+                    )
+            manual_elements.append(
+                Line2D(
+                    [0],
+                    [0],
+                    marker='o',
+                    color='w',
+                    label=f'{label_map[event_type]}: {num}',
+                    markersize=3,
+                    markerfacecolor=color_map[event_type],
+                    markeredgecolor='k',
+                    alpha=0.5,
+                )
+            )
+
+    else:
+        if temporal:
+            colormap = plt.cm.viridis
+            norm = mcolors.Normalize(
+                vmin=catalog['day'].min(),
+                vmax=catalog['day'].max()
+                )  # Normalize days to range [0, 1]
+            for day, group in catalog.groupby('day'):
+                print(f'day {day}: {len(group)}')
+                color = colormap(norm(day))
+                geo_ax.scatter(
+                    group[f'{prefix}longitude'],
+                    group[f'{prefix}latitude'],
+                    s=group['size'],
+                    c=color,
+                    alpha=0.5,
+                    label=f'Day {day} event num: {len(group)}',
+                    zorder=3,
+                )
+                if plot_profile:
+                    axes[0, 1].scatter(
+                        group[f'{prefix}depth_km'],
+                        group[f'{prefix}latitude'],
+                        s=group['size'],
+                        c=color,
+                        alpha=0.5,
+                        rasterized=True,
+                    )
+                    axes[1, 0].scatter(
+                        group[f'{prefix}longitude'],
+                        group[f'{prefix}depth_km'],
+                        s=group['size'],
+                        c=color,
+                        alpha=0.5,
+                        rasterized=True,
+                    )
+                # Add a colorbar to indicate progression
+            sm = plt.cm.ScalarMappable(cmap=colormap, norm=norm)
+            sm.set_array([])
+            # Create an inset for the colorbar within geo_ax
+            cbar_ax = inset_axes(
+                geo_ax,  # Parent axis (geo_ax)
+                width="3%",  # Width of the colorbar relative to geo_ax
+                height="50%",  # Height of the colorbar relative to geo_ax
+                loc="lower right",  # Location inside the geo_ax
+                bbox_to_anchor=(0.05, 0.05, 0.85, 0.9),  # Adjust position within geo_ax
+                bbox_transform=geo_ax.transAxes,  # Use geo_ax coordinates
+                borderpad=0,  # Padding around the inset
+            )
+            cbar = plt.colorbar(sm, cax=cbar_ax, orientation='vertical')
+            cbar.set_label("Day Since 0401")
+        else:
+            geo_ax.scatter(
+                catalog[f'{prefix}longitude'],
+                catalog[f'{prefix}latitude'],
+                s=catalog['size'],
+                c='r',
+                alpha=0.5,
+                label=f'Event num: {event_num}',
+                zorder=3,
+            )
+            if plot_profile:
+                axes[0, 1].scatter(
+                    catalog[f'{prefix}depth_km'],
+                    catalog[f'{prefix}latitude'],
+                    s=catalog['size'],
+                    c='r',
+                    alpha=0.5,
+                    rasterized=True,
+                )
+                axes[1, 0].scatter(
+                    catalog[f'{prefix}longitude'],
+                    catalog[f'{prefix}depth_km'],
+                    s=catalog['size'],
+                    c='r',
+                    alpha=0.5,
+                    rasterized=True,
+                    )
+        # profile
+        if plot_profile_line:
+            if len(center) == 0:
+                init_point  = (121.08, 23.65)
+                geod = Geod(ellps='WGS84')
+                init_center = geod.fwd(init_point[0], init_point[1], 110, 40*1000)
+                center = (init_center[0], init_center[1])
+            letters = string.ascii_uppercase
+            for i, (dis, letter) in enumerate(zip(np.linspace(0, 100, 21), letters[0:21])):
+                geod = Geod(ellps='WGS84')
+                next_lon, next_lat, _ = geod.fwd(center[0], center[1], 20, dis*1000)
+                text_lon, text_lat, _ = geod.fwd(init_point[0], init_point[1], 20, dis*1000)
+                add_profile_line(geo_ax=geo_ax, center=(next_lon, next_lat), azimuth=20, alpha=0.7, c='k')   
+                geo_ax.text(x=text_lon -0.02, y=text_lat, s=f"{letter}-{letter}'")        
+
+    # add main eq
+    for eq in eq_list:
+        _add_epicenter(
+            x=eq[0], y=eq[1], ax=geo_ax, size=main_eq_size, alpha=0.7, color=eq[4]
+        )
+        manual_elements.append(
+            Line2D(
+                [0],
+                [0],
+                marker='*',
+                color='w',
+                label=eq[3],
+                markersize=10,
+                markerfacecolor=eq[4],
+                markeredgecolor='k',
+            )
+        )
+    # geo_ax.autoscale(tight=True)
+    geo_ax.set_aspect('auto')
+    geo_ax.legend(
+        handles=manual_elements,  # + legend_elements,
+        loc='upper left',
+        markerscale=2,
+        labelspacing=1.5,
+        borderpad=1,
+        fontsize=10,
+        framealpha=0.6,
+    )
+    # geo_ax.add_artist(legend)
+    xlim = geo_ax.get_xlim()
+    ylim = geo_ax.get_ylim()
+    axes[0, 1].autoscale(tight=True)
+    axes[0, 1].set_ylim(ylim)
+    axes[0, 1].set_xlim([0, catalog['depth_km'].max() + 1])
+    # axes[0, 1].set_xlim([0, 62])  # gdms
+    axes[0, 1].set_xlabel('Depth (km)')
+    axes[0, 1].set_ylabel('Latitude')
+
+    axes[1, 0].autoscale(tight=True)
+    axes[1, 0].set_xlim(xlim)
+    axes[1, 0].set_ylim([0, catalog['depth_km'].max() + 1])
+    # axes[1, 0].set_ylim([0, 62])  # gdms
+    axes[1, 0].invert_yaxis()
+    axes[1, 0].set_ylabel('Depth (km)')
+    axes[1, 0].set_xlabel('Longitude')
+    axes[1, 1].axis('off')
+    axes[0, 0].axis('off')
+    plt.tight_layout()
+    if savefig and fig_dir is not None:
+        plt.savefig(fig_dir / f'{savename}.png', dpi=300, bbox_inches='tight')
 
 
 # plot single beachball check
@@ -1452,7 +1790,12 @@ def get_mag_distribution(df, name, start_date, end_date, fig_dir):
     )
 
 
-def get_mags_dist(df_list, name_list, start_date, end_date, fig_dir):
+def get_mags_dist(
+        df_list: list[pd.DataFrame], start_date: str, end_date: str, fig_dir, save_name=''
+        ):
+    """
+    Date format: '2024-04-01'
+    """
     color_map = {
         0: 'green',
         1: 'red',
@@ -1472,19 +1815,29 @@ def get_mags_dist(df_list, name_list, start_date, end_date, fig_dir):
         6: 'Seis + DAS',
     }
     plt.figure(figsize=(15, 10))
-    for df, name in zip(df_list, name_list):
+    for df in df_list:
         df['datetime'] = pd.to_datetime(df['time'])
         df = df[df['magnitude'] > 0]
         # Show correlation with scatter plot
-        for event_type, group in df.groupby('event_type'):
+        if 'event_type' in df.columns:
+            for event_type, group in df.groupby('event_type'):
+                plt.scatter(
+                    group['datetime'],
+                    group['magnitude'],
+                    alpha=0.7,
+                    color=color_map[event_type],
+                    s=5,
+                    label=f'{label_map[event_type]}: {len(group)}',
+                )
+        else:
             plt.scatter(
-                group['datetime'],
-                group['magnitude'],
+                df['datetime'],
+                df['magnitude'],
                 alpha=0.7,
-                color=color_map[event_type],
+                color='r',
                 s=5,
-                label=f'{label_map[event_type]}: {len(group)}',
-            )
+                label=f'Event num: {len(df)}',
+            )            
     plt.title('Magnitude vs Date', fontsize=25, pad=10)
     plt.xlabel('Date', fontsize=25, labelpad=10)
     plt.ylabel('Magnitude', fontsize=25, labelpad=10)
@@ -1505,10 +1858,284 @@ def get_mags_dist(df_list, name_list, start_date, end_date, fig_dir):
         label.set_horizontalalignment('right')
 
     # Set x-limits
-    ax.set_xlim([start_date, end_date])
+    ax.set_xlim([pd.Timestamp(start_date), pd.Timestamp(end_date)])
     ax.set_ylim(0, 8)
     plt.savefig(
-        fig_dir / f'{name[0]}_{name[1]}_mag_daily.png',
+        fig_dir / f'mag_dist_{save_name}.png',
         dpi=300,
         bbox_inches='tight',
     )
+
+
+def gamma_h3dd_combine(gamma_events: Path, h3dd_hout: Path, output: Path):
+    # reorder
+    df_events = pd.read_csv(gamma_events)
+    df_events['sort_time'] = pd.to_datetime(df_events['time'])
+    df_events = df_events.sort_values(by='sort_time')
+    df_events.drop(columns=['sort_time'], inplace=True)
+    df_events['h3dd_index'] = df_events.index
+
+    # adding h3dd
+    df_h3dd, _ = check_format(h3dd_hout)
+    df_h3dd = df_h3dd.add_prefix('h3dd_')
+    df_h3dd['h3dd_index'] = df_h3dd.index
+
+    # merge
+    df = pd.merge(df_events, df_h3dd, on='h3dd_index', how='left')
+    df.to_csv(output, index=False)
+    return df
+
+def calculate_fault_azimuth(fault_start, fault_end):
+    """
+    計算斷層的方向角（以正北為基準）。
+    """
+    geod = Geod(ellps="WGS84")
+    lon1, lat1 = fault_start
+    lon2, lat2 = fault_end
+    fault_azimuth, _, _ = geod.inv(lon1, lat1, lon2, lat2)
+    return fault_azimuth
+
+def project_events_to_profile(df_catalog: pd.DataFrame, length=10, width=80, depth_range=(0, 60),
+                              center: tuple | None = None, azimuth: float | None = None,
+                              fault_start: tuple | None = None, fault_end: tuple | None = None
+                              ):
+    """
+    Return the df in the profile range.
+    """
+    geod = Geod(ellps="WGS84")
+
+    # 計算斷層中點
+    if azimuth is None and fault_start is not None and fault_end is not None:
+        lon1, lat1 = fault_start
+        lon2, lat2 = fault_end
+        azimuth = calculate_fault_azimuth(fault_start, fault_end)
+        mid_lon, mid_lat = (lon1 + lon2) / 2, (lat1 + lat2) / 2
+    elif azimuth is not None and center is not None:
+        mid_lon, mid_lat = center
+    # 投影地震事件到剖面方向
+    results = []
+    for _, event in df_catalog.iterrows():
+        event_lon, event_lat, event_depth = event['longitude'], event['latitude'], event['depth_km']
+        day = event['day']
+        # 計算事件的方位角和距離
+        event_az, _, event_dist = geod.inv(mid_lon, mid_lat, event_lon, event_lat)
+
+        # 計算事件在剖面方向與垂直方向的距離分量
+        relative_angle = np.radians(event_az - azimuth)  # 方位角差值
+        y = event_dist * np.cos(relative_angle) / 1000  # 剖面方向距離（公里）
+        x = event_dist * np.sin(relative_angle) / 1000  # 垂直剖面距離（公里）
+
+        # 篩選符合剖面範圍的事件
+        if (
+            abs(y) <= length / 2 and  # 剖面長度範圍
+            abs(x) <= width / 2 and  # 剖面寬度範圍
+            depth_range[0] <= event_depth <= depth_range[1]  # 深度範圍
+        ):
+            results.append((day, x, y, event_lon, event_lat, event_depth))
+
+    # 返回結果 DataFrame
+    results_df = pd.DataFrame(results, columns=['day', 'x', 'y', 'longitude', 'latitude', 'depth'])
+    return results_df
+
+def add_profile_rectangle(geo_ax, length=10, width=80, center: tuple | None = None, azimuth: float | None = None,
+                              fault_start: tuple | None = None, fault_end: tuple | None = None, **kwargs):
+    """
+    Draws a dashed rectangle representing the profile range on a Cartopy GeoAxes.
+
+    Parameters:
+        geo_ax (GeoAxes): Cartopy GeoAxes object.
+        fault_start (tuple): Starting point of the fault (longitude, latitude).
+        fault_end (tuple): Ending point of the fault (longitude, latitude).
+        length (float): Profile length in kilometers.
+        width (float): Profile width in kilometers.
+        fault_azimuth (float): Fault direction angle (degrees), measured clockwise from North.
+        **kwargs: Additional plotting arguments for matplotlib (e.g., color, linestyle).
+
+    Returns:
+        None
+    """
+    geod = Geod(ellps="WGS84")
+
+    # Calculate the midpoint of the profile
+    if fault_start is not None and fault_end is not None:
+        mid_lon, mid_lat = (fault_start[0] + fault_end[0]) / 2, (fault_start[1] + fault_end[1]) / 2
+        azimuth = calculate_fault_azimuth(fault_start, fault_end)
+    elif center is not None and azimuth is not None:
+        mid_lon , mid_lat = center
+    else:
+        raise IndexError('Please provide the parameters')
+    # Calculate half-length and half-width
+    half_length = length / 2
+    half_width = width / 2
+
+    # Step 1: Extend the midpoint to get the front and back center points
+    front_center_lon, front_center_lat, _ = geod.fwd(mid_lon, mid_lat, azimuth, half_length * 1000)
+    back_center_lon, back_center_lat, _ = geod.fwd(mid_lon, mid_lat, azimuth, -half_length * 1000)
+
+    # Step 2: From the front and back center points, extend to the left and right to get the corners
+    corners = []
+
+    for center_lon, center_lat in [(front_center_lon, front_center_lat), (back_center_lon, back_center_lat)]:
+        # Left side (-90 degrees from fault direction)
+        left_lon, left_lat, _ = geod.fwd(center_lon, center_lat, azimuth - 90, half_width * 1000)
+        # Right side (+90 degrees from fault direction)
+        right_lon, right_lat, _ = geod.fwd(center_lon, center_lat, azimuth + 90, half_width * 1000)
+        corners.append((left_lon, left_lat))
+        corners.append((right_lon, right_lat))
+
+    # Step 3: Reorder the corners to form a closed rectangle (clockwise)
+    corners = [corners[0], corners[2], corners[3], corners[1], corners[0]]
+
+    # Plot the rectangle on the GeoAxes
+    lons, lats = zip(*corners)
+    geo_ax.plot(lons, lats, transform=ccrs.PlateCarree(), **kwargs)
+
+def add_profile_line(geo_ax, length=10, width=80, center: tuple | None = None, azimuth: float | None = None,
+                              fault_start: tuple | None = None, fault_end: tuple | None = None, **kwargs):
+    """
+    Draws a dashed rectangle representing the profile range on a Cartopy GeoAxes.
+
+    Parameters:
+        geo_ax (GeoAxes): Cartopy GeoAxes object.
+        fault_start (tuple): Starting point of the fault (longitude, latitude).
+        fault_end (tuple): Ending point of the fault (longitude, latitude).
+        length (float): Profile length in kilometers.
+        width (float): Profile width in kilometers.
+        fault_azimuth (float): Fault direction angle (degrees), measured clockwise from North.
+        **kwargs: Additional plotting arguments for matplotlib (e.g., color, linestyle).
+
+    Returns:
+        None
+    """
+    geod = Geod(ellps="WGS84")
+
+    # Calculate the midpoint of the profile
+    if fault_start is not None and fault_end is not None:
+        mid_lon, mid_lat = (fault_start[0] + fault_end[0]) / 2, (fault_start[1] + fault_end[1]) / 2
+        azimuth = calculate_fault_azimuth(fault_start, fault_end)
+    elif center is not None and azimuth is not None:
+        mid_lon , mid_lat = center
+    else:
+        raise IndexError('Please provide the parameters')
+    # Calculate half-length and half-width
+    half_length = length / 2
+    half_width = width / 2
+
+    # Step 1: Extend the midpoint to get the front and back center points
+    left_lon, left_lat, _ = geod.fwd(mid_lon, mid_lat, azimuth - 90, half_width * 1000)
+    right_lon, right_lat, _ = geod.fwd(mid_lon, mid_lat, azimuth + 90, half_width * 1000)
+
+    # Step 2: From the front and back center points, extend to the left and right to get the corners
+    corners = []
+    corners.append((left_lon, left_lat))
+    corners.append((right_lon, right_lat))
+
+    # Plot the rectangle on the GeoAxes
+    lons, lats = zip(*corners)
+    geo_ax.plot(lons, lats, transform=ccrs.PlateCarree(), **kwargs)
+
+def add_single_profile(events_df, ax, width=80, depth_range=(0, 60), profile='', temporal=True,
+                       manual_min=None, manual_max=None):
+    """
+    Plots a seismic profile on a given axis.
+    
+    Parameters:
+        events_df (pd.DataFrame): Contains 'x' (distance along profile) and 'depth' columns.
+        ax (matplotlib.axes.Axes): The axis to plot on.
+        width (float): Profile width (in km).
+        depth_range (tuple): Depth range (min_depth, max_depth) in km.
+        profile (str): Profile name (for labeling).
+    """
+    if temporal:
+        colormap = plt.cm.viridis
+        norm = mcolors.Normalize(
+            vmin=events_df['day'].min(),
+            vmax=events_df['day'].max()
+            )  # Normalize days to range [0, 1]
+        if manual_min is not None and manual_max is not None:
+            norm = mcolors.Normalize(
+                vmin=manual_min,
+                vmax=manual_max
+                )             
+        for day, group in events_df.groupby('day'):
+            print(f'day {day}: {len(group)}')
+            color = colormap(norm(day))    
+            ax.scatter(
+                group['x'],
+                group['depth'],
+                c=color,
+                s=5,
+                alpha=0.8
+                )
+    else:
+        ax.scatter(
+            events_df['x'],
+            events_df['depth'],
+            c='r',
+            s=5,
+            alpha=0.8
+            )
+    ax.set_xlim(-width / 2, width / 2)
+    ax.set_ylim(depth_range[0], depth_range[1])
+    ax.set_xlabel("Distance (km)")
+    ax.set_ylabel("Depth (km)")
+    ax.set_title(f"Earthquake Profile: {profile}_{profile}'")
+    ax.invert_yaxis()
+    ax.grid()
+
+def daily_profile(
+        df_catalog,
+        length=10,
+        width=80,
+        depth_range=(0, 60),
+        save_dir=Path(''),
+        profile_nums=21,
+        num_rows=3,
+        figsize=(),
+        center=(),
+        manual_min=1,
+        manual_max=17
+        ):
+    """
+    Plots a seismic profile on a given axis.
+    
+    Parameters:
+        events_df (pd.DataFrame): Contains 'x' (distance along profile) and 'depth' columns.
+        ax (matplotlib.axes.Axes): The axis to plot on.
+        width (float): Profile width (in km).
+        depth_range (tuple): Depth range (min_depth, max_depth) in km.
+        profile (str): Profile name (for labeling).
+    """
+    num_columns = profile_nums // num_rows
+    if len(figsize) == 0:
+        figsize=(num_columns * 10, num_rows * 6)
+
+    if len(center) == 0:
+        init_point  = (121.08, 23.65)
+        geod = Geod(ellps='WGS84')
+        init_center = geod.fwd(init_point[0], init_point[1], 110, 40*1000)
+        center = (init_center[0], init_center[1])
+    for day, group in df_catalog.groupby('day'):
+        fig = plt.figure(figsize=figsize)
+        gs = GridSpec(num_rows, num_columns, figure=fig)   
+        letters = string.ascii_uppercase
+        for i, (dis, letter) in enumerate(zip(np.linspace(0, 100, 21), letters[0:21])):
+            geod = Geod(ellps='WGS84')
+            next_lon, next_lat, _ = geod.fwd(center[0], center[1], 20, dis*1000)
+            print(next_lon, next_lat)
+            new_center = (next_lon, next_lat)
+            profile_events = project_events_to_profile(
+                df_catalog=group,
+                length=length, 
+                width=width,
+                depth_range=depth_range,
+                center=new_center,
+                azimuth=20
+                )
+            row = i % 3
+            col = i // 3
+            ax = fig.add_subplot(gs[row, col])
+            add_single_profile(profile_events, ax, profile=letter,
+                               manual_min=manual_min, manual_max=manual_max)
+        plt.tight_layout()
+        plt.savefig(save_dir / f'gridspec_cmap_{day}.png', dpi=300)
