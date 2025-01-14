@@ -16,6 +16,7 @@ gmt.history
 *.csv
 *.dout
 *.hout
+*.dat_ch
 *.P24
 *.ps
 *gamma_config.txt

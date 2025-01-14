@@ -2,7 +2,9 @@ import calendar
 import logging
 import math
 import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Tuple  # noqa: UP035
 
@@ -10,7 +12,7 @@ import numpy as np
 import pandas as pd
 from obspy import Stream, UTCDateTime, read
 from obspy.io.sac.sacpz import attach_paz
-from concurrent.futures import ThreadPoolExecutor
+
 from .utils import dmm_trans
 
 pre_filt = (0.1, 0.5, 30, 35)
@@ -467,7 +469,7 @@ class Magnitude:
 
         R = math.sqrt(dist**2 + depth**2)
         if depth <= 35:
-            if 0 < dist <= 80:
+            if 0 <= dist <= 80:
                 dA = -0.00716 * R - math.log10(R) - 0.39
             elif dist > 80:
                 dA = -0.00261 * R - 0.83 * math.log10(R) - 1.07
@@ -476,10 +478,11 @@ class Magnitude:
 
         return nloga - dA
 
-    def get_mag(self, event_index: int):
+    def get_mag(self, event_index: int, use_das=False):
         """
         Calculate suitable time window for each station in N4 determination.
         """
+        logging.info(f'Event: {event_index} started')
         df_event = self.df_h3dd_events[
             self.df_h3dd_events['h3dd_event_index'] == event_index
         ].copy()
@@ -493,7 +496,7 @@ class Magnitude:
         code_error_set = set()
         hor_comp_error_dict = {}
         for station in set(df_picks['station_id']):
-            if station[1].isdigit():
+            if use_das and station[1].isdigit():
                 continue
             df_sta_picks = df_picks[df_picks['station_id'] == station].copy()
 
@@ -502,9 +505,13 @@ class Magnitude:
             ymd, comp_list = self._check_ymd_comp(df=df_sta_picks, station=station)
             # TODO: Set a scenario is that having (E, N), (1, 2) is fine, current scenario will pass the serie like {E, N ,1, 2}
             if len(comp_list) == 2:  # ensuring we have 2 horizontal component.
-                code = self._kinethreshold(
-                    comp_list=comp_list, station=station, t1=t1, t2=t2
-                )
+                try:
+                    code = self._kinethreshold(
+                        comp_list=comp_list, station=station, t1=t1, t2=t2
+                    )
+                except Exception as e:
+                    logging.info(f'We encounter {e} in event {event_index}, to be more specific, in {station}')
+                    continue
                 if code == 0:
                     code_error_set.add(station)
                     continue
@@ -520,7 +527,7 @@ class Magnitude:
 
                 actual_depth = depth + df_sta_picks['elevation'].iloc[0]
                 if response_dict:
-                    logging.info(f'Event: {event_index}, calculating mag for {station}')
+                    # logging.info(f'Event: {event_index}, calculating mag for {station}')
                     sta_mag = self._calculate_mag(
                         response_dict=response_dict,
                         dist=float(df_sta_picks['dist'].iloc[0]),
@@ -548,7 +555,7 @@ class Magnitude:
             df_event['magnitude'] = np.nan
         return df_event, df_picks
 
-    def run_mag(self, processes=10):
+    def run_mag(self, use_das=False, processes=10):
         """
         Spawn processes to run `get_mag` for multiple event indices in parallel.
         """
@@ -557,10 +564,10 @@ class Magnitude:
         )
 
         event_indices = set(self.df_h3dd_events['h3dd_event_index'])
-
+        partial_func = partial(self.get_mag, use_das=use_das)
         with mp.Pool(processes=processes) as pool:
             results = pool.starmap(
-                self.get_mag, [(event_index,) for event_index in event_indices]
+                partial_func, [(event_index,) for event_index in event_indices]
             )
 
         # Collect all events and picks into lists

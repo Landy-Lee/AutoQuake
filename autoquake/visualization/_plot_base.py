@@ -11,17 +11,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pygmt
+from pyproj import Geod
 from cartopy.mpl.geoaxes import GeoAxes
 from geopy.distance import geodesic
 from matplotlib.axes import Axes
-from matplotlib.colors import LightSource
+from matplotlib.colors import LightSource, Normalize
 from matplotlib.gridspec import GridSpec
 from matplotlib.ticker import MultipleLocator
 from obspy import Stream, Trace, UTCDateTime, read
 from pyrocko import moment_tensor as pmt
 from pyrocko.plot import beachball, mpl_color
-
-
+from scipy.interpolate import griddata
+from typing import Any 
 # ===== Sauce =====
 def add_on_utc_time(time: str, delta: float) -> str:
     """
@@ -218,7 +219,7 @@ def _txt_preprocessor(df: pd.DataFrame) -> pd.DataFrame:
             + 'T'
             + df[1].apply(lambda x: f'{x[:2]}:{x[2:4]}:{x[4:6]}.{x[6:8]}0000')
         )
-        df = df.rename(columns={2: 'latitude', 3: 'longitude', 4: 'depth_km'})
+        df = df.rename(columns={2: 'latitude', 3: 'longitude', 4: 'depth_km', 5: 'magnitude'})
         mask = [i for i in df.columns.tolist() if isinstance(i, str)]
         df = df[mask]
         return df
@@ -284,6 +285,10 @@ def check_format(catalog, i=None):
     """
     Checking the format is GaMMA (events_catalog.csv), h3dd (.hout), gafocal (.txt), and
     converting it into union format.
+    ---
+    Returns
+        df (pd.DataFrame): format converted catalog.
+        timestamp (numpy array): total seconds of the events from catalog.
     """
     if isinstance(catalog, dict):
         file_path = catalog[i]['catalog']
@@ -419,14 +424,15 @@ def preprocess_gamma_csv(
 
 
 def _preprocess_phasenet_csv(
-    phasenet_picks: Path, starttime: str, endtime: str, get_station=lambda x: str(x).split('.')[1]
+    phasenet_picks: Path, starttime: str | None = None, endtime: str | None = None, get_station=lambda x: str(x).split('.')[1]
 ) -> pd.DataFrame:
     """## Preprocess the phasenet_csv
     Using get_station to retrieve the station name in station_id column.
     """
     df_all_picks = pd.read_csv(phasenet_picks)
     df_all_picks['phase_time'] = pd.to_datetime(df_all_picks['phase_time'])
-    df_all_picks = df_all_picks[(df_all_picks['phase_time']>=pd.Timestamp(starttime)) & (df_all_picks['phase_time']<=pd.Timestamp(endtime))]
+    if starttime is not None and endtime is not None:
+        df_all_picks = df_all_picks[(df_all_picks['phase_time']>=pd.Timestamp(starttime)) & (df_all_picks['phase_time']<=pd.Timestamp(endtime))]
     df_all_picks['total_seconds'] = df_all_picks['phase_time'].apply(get_total_seconds)
     # df_all_picks['system'] = df_all_picks['station_id'].apply(
     #     lambda x: str(x).split('.')[0]
@@ -1807,7 +1813,7 @@ def _add_das_picks(
 
 
 # ===== get function =====
-def get_mapview(region: list, ax: GeoAxes, title='Map', use_fault=True):
+def get_mapview(region: list, ax: GeoAxes, title='Map', use_fault=True, **kwargs):
     """## Plotting the basic map.
 
     Notice here, the ax should be a GeoAxes! A subclass of `matplotlib.axes.Axes`.
@@ -1839,7 +1845,7 @@ def get_mapview(region: list, ax: GeoAxes, title='Map', use_fault=True):
     if use_fault:
         add_fault(ax)
     ax.set_extent(region)
-    ax.set_title(title, fontsize=12)
+    ax.set_title(title, **kwargs)
     gl = ax.gridlines(draw_labels=True)
     gl.top_labels = False  # Turn off top labels
     gl.right_labels = False
@@ -2291,3 +2297,237 @@ def add_tw_coast(ax: Axes, tw_coast: Path):
                 lon_list, lat_list = [], []
                 lon_list.append(lon)
                 lat_list.append(lat)
+
+def add_vel_view(
+        ax: Axes,
+        vel_df: pd.DataFrame,
+        region: list[float],
+        depth=0,
+        mode='vp',
+        grid=False,
+        alpha=0.8,
+        cmap='jet_r',
+        vmin=1.5,
+        vmax=8.5
+        ):
+    """
+    Plot the velocity model at a specific depth on a geographic map using Cartopy.
+
+    Args:
+        ax (Axes): Matplotlib Axes object with a Cartopy projection.
+        csv_file (str): Path to the CSV file containing the velocity model.
+        region (tuple): Region bounds (min_lon, max_lon, min_lat, max_lat).
+        depth (float): Depth value to plot.
+        mode (str): 'vp', 'vs', 'VpVs'
+    """
+    # Load data from CSV
+    df = vel_df
+    # Filter data based on depth and region
+    filtered_df = df[
+        (df['lon'] >= region[0]) & (df['lon'] <= region[1]) &
+        (df['lat'] >= region[2]) & (df['lat'] <= region[3]) &
+        np.isclose(df['depth'], depth, atol=0.5)  # Depth tolerance
+    ]
+
+    if filtered_df.empty:
+        raise ValueError("No data found for the specified depth and region.")
+
+    # Create grid for plotting
+    lon = filtered_df['lon'].unique()
+    lat = filtered_df['lat'].unique()
+    lon_grid, lat_grid = np.meshgrid(lon, lat)
+    velocity = filtered_df.pivot(index='lat', columns='lon', values=mode).values
+
+    if grid:
+        im = ax.pcolormesh(
+            lon_grid, lat_grid, velocity,
+            transform=ccrs.PlateCarree(), cmap=cmap, shading='auto'
+        )
+    else:
+        levels = np.linspace(vmin, vmax, 21)
+        im = ax.contourf(
+            lon_grid, lat_grid, velocity,
+            transform=ccrs.PlateCarree(), cmap=cmap, levels=levels, alpha=alpha
+        )
+
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax, orientation="vertical", shrink=0.6)
+    cbar.set_label(f"{mode} (km/s)")
+    ax.set_extent(region, crs=ccrs.PlateCarree())
+
+def _generate_profile_points(start_point, azimuth, distance, dist_interval):
+    """
+    Generate profile points along a geodesic based on a start point, azimuth, and distance.
+
+    Args:
+        start_point (tuple): Starting point as (longitude, latitude) in degrees.
+        azimuth (float): Azimuth (direction) in degrees (clockwise from north).
+        distance (float): Total distance of the profile in kilometers.
+        n_points (int): Number of points to generate along the profile.
+
+    Returns:
+        profile_points (list): List of (longitude, latitude) points along the profile.
+    """
+    geod = Geod(ellps="WGS84")  # Define Earth model
+
+    # Divide total distance into evenly spaced segments
+    distances = np.arange(0, distance*1000, dist_interval*1000)  # Convert km to meters
+    if distances[-1] != distance*1000:
+        distances = np.append(distances, distance*1000)
+    print(distances)
+    # Compute profile points
+    lon, lat = start_point
+    profile_points = [geod.fwd(lon, lat, azimuth, dist)[:2] for dist in distances]
+    return profile_points
+
+def add_vel_profile(
+        ax: Axes,
+        vel_df: pd.DataFrame,
+        start_point: tuple,
+        distance: Any,
+        azimuth: Any,
+        dist_interval=12,
+        depth_range=(0, 60),
+        mode='vpt',        
+        cmap='RdYlBu',
+        cax: Axes | None = None
+):
+    """
+    Extract and plot a velocity profile along a line between two geographic points.
+
+    Args:
+        ax (Axes): Matplotlib Axes object for plotting.
+        csv_file (str): Path to the CSV file containing the velocity model.
+        start_point (tuple): Start point of the profile (lon, lat).
+        mode (str): 'vpt', 'vst', 'vpvst'
+        distance (float): Total distance of the profile in kilometers.
+        azimuth (float): Azimuth (direction) in degrees (clockwise from north).
+        dist_interval (float): Distance interval between points in kilometers.
+        depth_range (tuple): Depth range for the profile (min_depth, max_depth).
+        depth_step (float): Step size for regular depth grid (km).
+        vmin (float): Minimum value for the color scale.
+        vmax (float): Maximum value for the color scale.
+    """
+    # Load data from CSV
+    df = vel_df
+
+    # Generate profile points
+    profile_points = _generate_profile_points(start_point, azimuth, distance, dist_interval)
+
+    # Regular depth grid
+    depth_array = df['dep'].unique()
+    depth_subset = depth_array[(depth_array >= depth_range[0]) & (depth_array <= depth_range[1])]
+
+    # Create velocity grid
+    velocity_grid = np.full((len(depth_subset), len(profile_points)), np.nan)
+
+    for i, (lon, lat) in enumerate(profile_points):
+        point_data = df[
+            (df['lon'].between(lon - 0.04, lon + 0.04)) &
+            (df['lat'].between(lat - 0.04, lat + 0.04))
+        ]
+        if not point_data.empty:
+            for j, depth in enumerate(depth_subset):
+                depth_data = point_data[point_data['dep'] == depth]
+                if not depth_data.empty:
+                    velocity_grid[j, i] = depth_data[mode].mean()
+
+    # Plot velocity profile
+    distances = np.arange(0, distance, dist_interval)  # Convert km to meters
+    if distances[-1] != distance:
+        distances = np.append(distances, distance)
+
+    min_max_map = {
+        'vpt': (-30, 30),
+        'vst': (-25, 25),
+        'vpvst': (-25, 25)
+    }
+
+    levels = np.linspace(min_max_map[mode][0], min_max_map[mode][1], 21)
+    contourf = ax.contourf(
+        distances, depth_subset, velocity_grid, levels=levels, cmap=cmap, vmin=min_max_map[mode][0], vmax=min_max_map[mode][1]
+    )
+    if cax is not None:
+        cbar = plt.colorbar(contourf, cax=cax)
+    else:
+        cbar = plt.colorbar(contourf, ax=ax)
+    cbar.set_label(mode)
+
+def extract_topo_profile_with_geod(
+        csv_path: Path,
+        start_point: tuple,
+        azimuth: Any,
+        distance_km: Any,
+        lon_res=0.004579279,
+        lat_res=0.004577823,
+        ):
+    """
+    Generate a topographic profile using pyproj.Geod for great-circle calculations.
+    
+    Parameters:
+    - csv_path: Path to the CSV file containing 'lon', 'lat', 'elevation'.
+    - start_point: Tuple (lon, lat) as the starting point of the profile.
+    - azimuth: Direction in degrees clockwise from North.
+    - distance_km: Length of the profile in kilometers.
+    - lon_res: Resolution in longitude degrees (e.g., 0.004579279).
+    - lat_res: Resolution in latitude degrees (e.g., 0.004577823).
+
+    Returns:
+    - distances: Array of distances along the profile.
+    - elevations: Array of interpolated elevation values.
+    """
+    # Step 1: Load the topographic data
+    topo_data = pd.read_csv(csv_path)
+    topo_data.columns = ['lon', 'lat', 'elevation']  # Ensure correct column names
+    
+    # Step 2: Initialize Geod for geodetic calculations
+    geod = Geod(ellps="WGS84")
+    
+    # Calculate resolution in kilometers (average of lon_res and lat_res)
+    avg_resolution_km = (lon_res + lat_res) / 2 * 111  # Approx conversion to km
+    num_points = int(distance_km / avg_resolution_km)
+    # Step 3: Generate points along the great-circle path
+    lons, lats = [start_point[0]], [start_point[1]]  # Initialize lists with the start point
+    for i in range(1, num_points + 1):
+        # Calculate the next point along the path
+        lon, lat, _ = geod.fwd(lons[-1], lats[-1], azimuth, avg_resolution_km * 1000)  # distance in meters
+        lons.append(lon)
+        lats.append(lat)
+    
+    # Step 4: Interpolate elevation values along the profile
+    grid_elevations = griddata(
+        points=(topo_data['lon'], topo_data['lat']),
+        values=topo_data['elevation'],
+        xi=(lons, lats),
+        method='linear'
+    )
+    
+    # Generate distances along the profile
+    distances = np.linspace(0, distance_km, num_points + 1)
+    
+    return distances, grid_elevations
+
+def add_topo_profile(ax: Axes, distances, elevations, profile_letter=''):
+    """
+    Plot the topographic profile.
+    
+    Parameters:
+    - distances: Array of distances along the profile.
+    - elevations: Array of interpolated elevation values.
+    """
+    
+    ax.fill_between(distances, elevations / 1000, color="black", alpha=0.7)  # Convert to km
+    ax.axhline(0, color="blue", linestyle="--", linewidth=0.8, alpha=0.8)  # Groundline
+
+    ax.set_xticks([])
+    ax.spines['top'].set_visible(False)  # Hide the top spine
+    ax.spines['right'].set_visible(False)  # Hide the right spine
+    ax.spines['bottom'].set_visible(False)  # Hide the bottom spine    
+    ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)  # No x-axis ticks/labels    
+    ax.set_ylabel("Topo (km)")
+    ax.set_xlim(distances[0], distances[-1])
+
+    # Only keep left y-axis
+    ax.spines['left'].set_position(('outward', 5))  # Offset the left spine slightly
+    ax.tick_params(axis="y", which="both", direction="out", length=5)  # Customize y-tick style
+    ax.set_title(f"Earthquake Profile: {profile_letter}_{profile_letter}'", fontsize=20)

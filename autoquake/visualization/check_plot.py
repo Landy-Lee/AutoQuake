@@ -17,15 +17,16 @@ import cartopy.feature as cfeature
 import matplotlib.colors as mcolors
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import numpy as np
 import pandas as pd
 from cartopy.mpl.geoaxes import GeoAxes
-from matplotlib.gridspec import GridSpec
+from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 from matplotlib.lines import Line2D
 from matplotlib.ticker import MultipleLocator
 from pyproj import Geod
-
+from typing import Any
 # from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
 # from collections import defaultdict
 # from pyrocko import moment_tensor as pmt
@@ -36,6 +37,8 @@ from ._plot_base import (
     _preprocess_focal_files,
     _preprocess_phasenet_csv,
     add_on_utc_time,
+    add_vel_view,
+    add_vel_profile,
     catalog_filter,
     check_format,
     find_gafocal_polarity,
@@ -53,6 +56,8 @@ from ._plot_base import (
     polarity_color_select,
     preprocess_gamma_csv,
     station_mask,
+    extract_topo_profile_with_geod,
+    add_topo_profile
 )
 
 
@@ -1132,7 +1137,9 @@ def plot_mapview_temp(
     savename='',
     temporal=False,
     plot_profile_line=False,
-    center=()
+    start_point=(121.08, 23.65),
+    plot_vel=False,
+    vel_df: pd.DataFrame | None = None # we should write a function to check the type
 ):
     """
     catalog should at least contains the lon and lat.
@@ -1168,6 +1175,12 @@ def plot_mapview_temp(
             catalog_filter_['max_lat'],
         ]
     get_mapview(region=region, ax=geo_ax, title=title)
+    if plot_vel and vel_df is not None:
+        add_vel_view(
+            ax=geo_ax,
+            vel_df=vel_df,
+            region=region
+        )
     # ax setting
     geo_ax.set_xlim(region[0], region[1])
     geo_ax.set_ylim(region[2], region[3])
@@ -1204,6 +1217,18 @@ def plot_mapview_temp(
     ]
     # add all events
     event_num = len(catalog)
+    manual_elements.append(
+        Line2D(
+            [0],
+            [0],
+            marker='o',
+            color='w',
+            label=f'Event num: {event_num}',
+            markersize=5,
+            markerfacecolor='k',
+            markeredgecolor='k',
+        )
+    )       
     if h3dd_mode:
         prefix = 'h3dd_'
     if 'event_type' in catalog.columns:
@@ -1356,17 +1381,16 @@ def plot_mapview_temp(
                 catalog[f'{prefix}longitude'],
                 catalog[f'{prefix}latitude'],
                 s=catalog['size'],
-                c='r',
+                c='k',
                 alpha=0.5,
-                label=f'Event num: {event_num}',
                 zorder=3,
-            )
+            )         
             if plot_profile:
                 axes[0, 1].scatter(
                     catalog[f'{prefix}depth_km'],
                     catalog[f'{prefix}latitude'],
                     s=catalog['size'],
-                    c='r',
+                    c='k',
                     alpha=0.5,
                     rasterized=True,
                 )
@@ -1374,30 +1398,38 @@ def plot_mapview_temp(
                     catalog[f'{prefix}longitude'],
                     catalog[f'{prefix}depth_km'],
                     s=catalog['size'],
-                    c='r',
+                    c='k',
                     alpha=0.5,
                     rasterized=True,
                     )
         # profile
         if plot_profile_line:
-            if len(center) == 0:
-                init_point  = (121.08, 23.65)
-                geod = Geod(ellps='WGS84')
-                init_center = geod.fwd(init_point[0], init_point[1], 110, 40*1000)
-                center = (init_center[0], init_center[1])
             letters = string.ascii_uppercase
             for i, (dis, letter) in enumerate(zip(np.linspace(0, 100, 21), letters[0:21])):
                 geod = Geod(ellps='WGS84')
-                next_lon, next_lat, _ = geod.fwd(center[0], center[1], 20, dis*1000)
-                text_lon, text_lat, _ = geod.fwd(init_point[0], init_point[1], 20, dis*1000)
-                add_profile_line(geo_ax=geo_ax, center=(next_lon, next_lat), azimuth=20, alpha=0.7, c='k')   
-                geo_ax.text(x=text_lon -0.02, y=text_lat, s=f"{letter}-{letter}'")        
+                next_lon, next_lat, _ = geod.fwd(start_point[0], start_point[1], 20, dis*1000)
+                text_lon, text_lat, _ = geod.fwd(start_point[0], start_point[1], 20, dis*1000)
+                add_profile_line(geo_ax=geo_ax, extend_km=80, start_point=(next_lon, next_lat), azimuth=20 + 90, alpha=0.7, c='k')   
+                geo_ax.text(x=text_lon -0.02, y=text_lat, s=f"{letter}-{letter}'")
+            start_point = (121.485, 24.667)
+            for i, (dis, letter) in enumerate(zip(np.linspace(0, 70, 15), letters[0:15])):
+                geod = Geod(ellps='WGS84')
+                next_lon, next_lat, _ = geod.fwd(start_point[0], start_point[1], 110, dis*1000)
+                text_lon, text_lat, _ = geod.fwd(start_point[0], start_point[1], 110, dis*1000)
+                add_profile_line(geo_ax=geo_ax, extend_km=120, start_point=(next_lon, next_lat), azimuth=110 + 90, alpha=0.7, c='k')   
+                geo_ax.text(x=text_lon -0.02, y=text_lat, s=f"{letter}-{letter}'")                    
 
     # add main eq
     for eq in eq_list:
         _add_epicenter(
             x=eq[0], y=eq[1], ax=geo_ax, size=main_eq_size, alpha=0.7, color=eq[4]
         )
+        _add_epicenter(
+            x=eq[2], y=eq[1], ax=axes[0, 1], size=main_eq_size, alpha=0.7, color=eq[4]
+        )
+        _add_epicenter(
+            x=eq[0], y=eq[2], ax=axes[1, 0], size=main_eq_size, alpha=0.7, color=eq[4]
+        )                
         manual_elements.append(
             Line2D(
                 [0],
@@ -1791,7 +1823,7 @@ def get_mag_distribution(df, name, start_date, end_date, fig_dir):
 
 
 def get_mags_dist(
-        df_list: list[pd.DataFrame], start_date: str, end_date: str, fig_dir, save_name=''
+        df_list: list[pd.DataFrame], start_date: str, end_date: str, fig_dir, color_list: list, name_list: list, save_name=''
         ):
     """
     Date format: '2024-04-01'
@@ -1815,7 +1847,7 @@ def get_mags_dist(
         6: 'Seis + DAS',
     }
     plt.figure(figsize=(15, 10))
-    for df in df_list:
+    for df, color, name in zip(df_list, color_list, name_list):
         df['datetime'] = pd.to_datetime(df['time'])
         df = df[df['magnitude'] > 0]
         # Show correlation with scatter plot
@@ -1834,11 +1866,11 @@ def get_mags_dist(
                 df['datetime'],
                 df['magnitude'],
                 alpha=0.7,
-                color='r',
+                color=color,
                 s=5,
-                label=f'Event num: {len(df)}',
+                label=f'{name} event num: {len(df)}',
             )            
-    plt.title('Magnitude vs Date', fontsize=25, pad=10)
+    plt.title('Magnitude temporal variation', fontsize=25, pad=10)
     plt.xlabel('Date', fontsize=25, labelpad=10)
     plt.ylabel('Magnitude', fontsize=25, labelpad=10)
     plt.grid(True)
@@ -1893,11 +1925,11 @@ def calculate_fault_azimuth(fault_start, fault_end):
     lon1, lat1 = fault_start
     lon2, lat2 = fault_end
     fault_azimuth, _, _ = geod.inv(lon1, lat1, lon2, lat2)
-    return fault_azimuth
+    return float(fault_azimuth)
 
 def project_events_to_profile(df_catalog: pd.DataFrame, length=10, width=80, depth_range=(0, 60),
                               center: tuple | None = None, azimuth: float | None = None,
-                              fault_start: tuple | None = None, fault_end: tuple | None = None
+                              fault_start: tuple | None = None, fault_end: tuple | None = None, temporal=False
                               ):
     """
     Return the df in the profile range.
@@ -1916,7 +1948,8 @@ def project_events_to_profile(df_catalog: pd.DataFrame, length=10, width=80, dep
     results = []
     for _, event in df_catalog.iterrows():
         event_lon, event_lat, event_depth = event['longitude'], event['latitude'], event['depth_km']
-        day = event['day']
+        if temporal:
+            day = event['day']
         # 計算事件的方位角和距離
         event_az, _, event_dist = geod.inv(mid_lon, mid_lat, event_lon, event_lat)
 
@@ -1931,10 +1964,15 @@ def project_events_to_profile(df_catalog: pd.DataFrame, length=10, width=80, dep
             abs(x) <= width / 2 and  # 剖面寬度範圍
             depth_range[0] <= event_depth <= depth_range[1]  # 深度範圍
         ):
-            results.append((day, x, y, event_lon, event_lat, event_depth))
-
+            if temporal:
+                results.append((day, x+width/2, y, event_lon, event_lat, event_depth))
+            else:
+                results.append((x+width/2, y, event_lon, event_lat, event_depth))
     # 返回結果 DataFrame
-    results_df = pd.DataFrame(results, columns=['day', 'x', 'y', 'longitude', 'latitude', 'depth'])
+    if temporal:
+        results_df = pd.DataFrame(results, columns=['day', 'x', 'y', 'longitude', 'latitude', 'depth'])
+    else:
+        results_df = pd.DataFrame(results, columns=['x', 'y', 'longitude', 'latitude', 'depth'])
     return results_df
 
 def add_profile_rectangle(geo_ax, length=10, width=80, center: tuple | None = None, azimuth: float | None = None,
@@ -1990,8 +2028,15 @@ def add_profile_rectangle(geo_ax, length=10, width=80, center: tuple | None = No
     lons, lats = zip(*corners)
     geo_ax.plot(lons, lats, transform=ccrs.PlateCarree(), **kwargs)
 
-def add_profile_line(geo_ax, length=10, width=80, center: tuple | None = None, azimuth: float | None = None,
-                              fault_start: tuple | None = None, fault_end: tuple | None = None, **kwargs):
+def add_profile_line(
+        geo_ax: Axes,
+        extend_km: Any,
+        azimuth: Any,
+        start_point: tuple | None = None,
+        fault_start: tuple | None = None,
+        fault_end: tuple | None = None,
+        **kwargs
+        ):
     """
     Draws a dashed rectangle representing the profile range on a Cartopy GeoAxes.
 
@@ -2012,30 +2057,28 @@ def add_profile_line(geo_ax, length=10, width=80, center: tuple | None = None, a
     # Calculate the midpoint of the profile
     if fault_start is not None and fault_end is not None:
         mid_lon, mid_lat = (fault_start[0] + fault_end[0]) / 2, (fault_start[1] + fault_end[1]) / 2
-        azimuth = calculate_fault_azimuth(fault_start, fault_end)
-    elif center is not None and azimuth is not None:
-        mid_lon , mid_lat = center
+        azimuth = calculate_fault_azimuth(fault_start, fault_end) # parallel to fault
+        start_lon, start_lat, _ = geod.fwd(mid_lon, mid_lat, azimuth - 90, (extend_km / 2)*1000)
+        azimuth = azimuth + 90 # perpendicular to fault
+    elif start_point is not None and azimuth is not None:
+        start_lon , start_lat = start_point
     else:
         raise IndexError('Please provide the parameters')
-    # Calculate half-length and half-width
-    half_length = length / 2
-    half_width = width / 2
 
-    # Step 1: Extend the midpoint to get the front and back center points
-    left_lon, left_lat, _ = geod.fwd(mid_lon, mid_lat, azimuth - 90, half_width * 1000)
-    right_lon, right_lat, _ = geod.fwd(mid_lon, mid_lat, azimuth + 90, half_width * 1000)
+    # the extend point
+    end_lon, end_lat, _ = geod.fwd(start_lon, start_lat, azimuth, extend_km * 1000)
 
     # Step 2: From the front and back center points, extend to the left and right to get the corners
     corners = []
-    corners.append((left_lon, left_lat))
-    corners.append((right_lon, right_lat))
+    corners.append((start_lon, start_lat))
+    corners.append((end_lon, end_lat))
 
     # Plot the rectangle on the GeoAxes
     lons, lats = zip(*corners)
     geo_ax.plot(lons, lats, transform=ccrs.PlateCarree(), **kwargs)
 
-def add_single_profile(events_df, ax, width=80, depth_range=(0, 60), profile='', temporal=True,
-                       manual_min=None, manual_max=None):
+def add_single_profile(events_df, ax: Axes, width: Any, depth_range=(0, 60), temporal=True,
+                       manual_min=None, manual_max=None, **kwargs):
     """
     Plots a seismic profile on a given axis.
     
@@ -2058,12 +2101,12 @@ def add_single_profile(events_df, ax, width=80, depth_range=(0, 60), profile='',
                 vmax=manual_max
                 )             
         for day, group in events_df.groupby('day'):
-            print(f'day {day}: {len(group)}')
+            # print(f'day {day}: {len(group)}')
             color = colormap(norm(day))    
             ax.scatter(
                 group['x'],
                 group['depth'],
-                c=color,
+                c='k',#color,
                 s=5,
                 alpha=0.8
                 )
@@ -2071,71 +2114,561 @@ def add_single_profile(events_df, ax, width=80, depth_range=(0, 60), profile='',
         ax.scatter(
             events_df['x'],
             events_df['depth'],
-            c='r',
             s=5,
-            alpha=0.8
+            **kwargs
             )
-    ax.set_xlim(-width / 2, width / 2)
+    # ax.tick_params(axis="x", which="both", bottom=True, labelbottom=True)
+    ax.set_xlim(0, width)#(-width / 2, width / 2)
     ax.set_ylim(depth_range[0], depth_range[1])
     ax.set_xlabel("Distance (km)")
     ax.set_ylabel("Depth (km)")
-    ax.set_title(f"Earthquake Profile: {profile}_{profile}'")
     ax.invert_yaxis()
-    ax.grid()
+    # ax.grid()
+
+def _daily_job(figsize, num_columns, profile_nums, start_point, other_catalog, length, width, depth_range, group, 
+              num_rows, azimuth, topo_csv, plot_vel, vel_df, vel_mode, vel_cmap, manual_min, manual_max, save_dir, day):
+    fig = plt.figure(figsize=figsize)
+    outer_gs = GridSpec(num_rows, num_columns, figure=fig)   
+    letters = string.ascii_uppercase
+    for i, (dis, letter) in enumerate(zip(np.linspace(0, (length / 2)*(profile_nums-1), profile_nums), letters[0:profile_nums])):    
+        geod = Geod(ellps='WGS84')
+        next_lon, next_lat, _ = geod.fwd(start_point[0], start_point[1], azimuth, dis*1000)
+        print(f'Next start point: ({next_lon}, {next_lat})')
+        new_lon, new_lat, _ = geod.fwd(next_lon, next_lat, azimuth + 90, (width / 2)*1000)
+        new_center = (new_lon, new_lat)
+        # plot background events
+        if other_catalog is not None:
+            other_events = project_events_to_profile(
+                df_catalog=other_catalog,
+                length=length, 
+                width=width,
+                depth_range=depth_range,
+                center=new_center,
+                azimuth=20,
+                )                
+        profile_events = project_events_to_profile(
+            df_catalog=group,
+            length=length, 
+            width=width,
+            depth_range=depth_range,
+            center=new_center,
+            azimuth=20
+            )
+        row = i % num_rows
+        col = i // num_rows
+        inner_gs = GridSpecFromSubplotSpec(
+            2,
+            3,
+            subplot_spec=outer_gs[row, col],
+            height_ratios=[1, 3],
+            width_ratios=[1, 1, 0.05]
+        )
+        # plotting topo
+        ax1 = fig.add_subplot(inner_gs[0, :-1])
+        distances, elevations = extract_topo_profile_with_geod(
+            csv_path=topo_csv,
+            start_point=(next_lon, next_lat),
+            azimuth=azimuth+90,
+            distance_km=width
+            )
+        add_topo_profile(
+            ax=ax1,
+            distances=distances,
+            elevations=elevations,
+            profile_letter=letter
+        )
+        # plotting profile
+        ax2 = fig.add_subplot(inner_gs[1, :-1])
+        cax = fig.add_subplot(inner_gs[1, -1:])
+        if plot_vel:
+
+            #TODO: Adding a condition to solve possibly unbound.
+            add_vel_profile(
+                ax=ax2,
+                vel_df=vel_df,
+                start_point=(next_lon, next_lat),
+                mode=vel_mode,
+                cax=cax,
+                cmap=vel_cmap,
+                distance=width,
+                azimuth=azimuth
+            )
+        if other_catalog is not None:
+            add_single_profile(
+                other_events,
+                ax2,
+                temporal=False,
+                c='gray',
+                alpha=0.5,
+                width=width,
+                depth_range=depth_range
+                )                
+        add_single_profile(
+            profile_events,
+            ax2,
+            manual_min=manual_min,
+            manual_max=manual_max,
+            width=width,
+            depth_range=depth_range
+            )
+    plt.tight_layout()
+    plt.savefig(save_dir / f'gridspec_cmap_{day}.png', dpi=300)
+    plt.close()
 
 def daily_profile(
-        df_catalog,
+        df_catalog: pd.DataFrame,
+        topo_csv,
+        start_point=(121.08, 23.65),
+        other_catalog: pd.DataFrame | None = None,
         length=10,
         width=80,
+        azimuth=20,
         depth_range=(0, 60),
         save_dir=Path(''),
+        save_name='',
         profile_nums=21,
         num_rows=3,
         figsize=(),
-        center=(),
         manual_min=1,
-        manual_max=17
+        manual_max=17,
+        plot_vel=False,
+        vel_txt: Path | None = None,
+        vel_mode='vpt',
+        vel_cmap='RdYlBu',
+        temporal=False
         ):
     """
     Plots a seismic profile on a given axis.
     
     Parameters:
-        events_df (pd.DataFrame): Contains 'x' (distance along profile) and 'depth' columns.
-        ax (matplotlib.axes.Axes): The axis to plot on.
-        width (float): Profile width (in km).
-        depth_range (tuple): Depth range (min_depth, max_depth) in km.
-        profile (str): Profile name (for labeling).
+        azimuth (int | float): the profile moving azimuth, to be more specific, the slope between the start point of A-A' and B-B'
     """
-    num_columns = profile_nums // num_rows
+    if profile_nums % num_rows == 0:
+        num_columns = profile_nums // num_rows
+    else:    
+        num_columns = (profile_nums // num_rows) + 1
     if len(figsize) == 0:
-        figsize=(num_columns * 10, num_rows * 6)
+        figsize=(num_columns * 10, num_rows * 7)
 
-    if len(center) == 0:
-        init_point  = (121.08, 23.65)
-        geod = Geod(ellps='WGS84')
-        init_center = geod.fwd(init_point[0], init_point[1], 110, 40*1000)
-        center = (init_center[0], init_center[1])
-    for day, group in df_catalog.groupby('day'):
+    geod = Geod(ellps='WGS84')
+    
+    if vel_txt is not None:
+        vel_df = pd.read_csv(vel_txt, sep='\s+')
+
+    if temporal:
+        args =[
+            (figsize, num_columns, profile_nums, start_point,
+            other_catalog, length, width, depth_range, group, 
+            num_rows, azimuth, topo_csv, plot_vel, vel_df, vel_mode,
+            vel_cmap, manual_min, manual_max, save_dir, day)
+            for day, group in df_catalog.groupby('day')
+            ]        
+        with mp.Pool(processes=20) as pool:
+            pool.starmap(_daily_job, args)
+    else:
         fig = plt.figure(figsize=figsize)
-        gs = GridSpec(num_rows, num_columns, figure=fig)   
+        outer_gs = GridSpec(num_rows, num_columns, figure=fig)   
         letters = string.ascii_uppercase
-        for i, (dis, letter) in enumerate(zip(np.linspace(0, 100, 21), letters[0:21])):
+        for i, (dis, letter) in enumerate(
+            zip(
+                np.linspace(0, (length / 2)*(profile_nums-1), profile_nums),
+                letters[0:profile_nums]
+                )
+                ):
             geod = Geod(ellps='WGS84')
-            next_lon, next_lat, _ = geod.fwd(center[0], center[1], 20, dis*1000)
-            print(next_lon, next_lat)
-            new_center = (next_lon, next_lat)
+            next_lon, next_lat, _ = geod.fwd(start_point[0], start_point[1], azimuth, dis*1000)
+            print(f'Next start point: ({next_lon}, {next_lat})')
+            new_lon, new_lat, _ = geod.fwd(next_lon, next_lat, azimuth + 90, (width / 2)*1000)
+            new_center = (new_lon, new_lat)
+            print(f'Center point: {new_center}')
+            # plot background events
+            if other_catalog is not None:
+                other_events = project_events_to_profile(
+                    df_catalog=other_catalog,
+                    length=length, 
+                    width=width,
+                    depth_range=depth_range,
+                    center=new_center,
+                    azimuth=azimuth,
+                    )                
             profile_events = project_events_to_profile(
-                df_catalog=group,
+                df_catalog=df_catalog,
                 length=length, 
                 width=width,
                 depth_range=depth_range,
                 center=new_center,
-                azimuth=20
+                azimuth=azimuth
                 )
-            row = i % 3
-            col = i // 3
-            ax = fig.add_subplot(gs[row, col])
-            add_single_profile(profile_events, ax, profile=letter,
-                               manual_min=manual_min, manual_max=manual_max)
+            row = i % num_rows
+            col = i // num_rows
+            inner_gs = GridSpecFromSubplotSpec(
+                2,
+                3,
+                subplot_spec=outer_gs[row, col],
+                height_ratios=[1, 3],
+                width_ratios=[1, 1, 0.05]
+            )
+            # plotting topo
+            ax1 = fig.add_subplot(inner_gs[0, :-1])
+            distances, elevations = extract_topo_profile_with_geod(
+                csv_path=topo_csv,
+                start_point=(next_lon, next_lat),
+                azimuth=azimuth+90,
+                distance_km=width
+                )
+            add_topo_profile(
+                ax=ax1,
+                distances=distances,
+                elevations=elevations,
+                profile_letter=letter
+            )
+            # plotting profile
+            ax2 = fig.add_subplot(inner_gs[1, :-1])
+            cax = fig.add_subplot(inner_gs[1, -1:])
+            if plot_vel:
+                #TODO: Adding a condition to solve possibly unbound.
+                add_vel_profile(
+                    ax=ax2,
+                    vel_df=vel_df,
+                    start_point=(next_lon, next_lat),
+                    mode=vel_mode,
+                    cax=cax,
+                    cmap=vel_cmap,
+                    distance=width,
+                    azimuth=azimuth + 90
+                )
+            if other_catalog is not None:
+                add_single_profile(
+                    other_events,
+                    ax2,
+                    temporal=False,
+                    c='gray',
+                    alpha=0.5,
+                    width=width,
+                    depth_range=depth_range
+                    )                
+            add_single_profile(
+                profile_events,
+                ax2,
+                # manual_min=manual_min,
+                # manual_max=manual_max,
+                temporal=False,
+                c='k',
+                width=width,
+                depth_range=depth_range
+                )
         plt.tight_layout()
-        plt.savefig(save_dir / f'gridspec_cmap_{day}.png', dpi=300)
+        plt.savefig(save_dir / save_name, dpi=300)
+        plt.close()
+
+
+def mapview_with_profile(
+    station: Path,
+    topo_csv,
+    catalog: pd.DataFrame,
+    other_catalog: pd.DataFrame | None = None,
+    depth_range=(0, 60),
+    profile_nums=6,
+    num_rows=3,
+    catalog_filter_: dict | None = None,
+    title='Event distribution',
+    eq_list=[],
+    main_eq_size=10,
+    plot_station_name=True,
+    savefig=True,
+    fig_dir: Path | None = None,
+    h3dd_mode=False,
+    prefix='',
+    savename='',
+    temporal=False,
+    plot_profile_line=False,
+    horizontal_start_point=(121.08, 23.65),
+    horizontal_movement={'length': 10, 'width': 80, 'azimuth': 20, 'steps': np.linspace(0, 100, 21), 'letters': Any}, # length, width, azimuth
+    vertical_start_point=(121.485, 24.667),
+    vertical_movement={'length': 10, 'width': 120, 'azimuth': 110, 'steps': np.linspace(0, 70, 15), 'letters': Any},
+    target_start_point=(121.485, 24.667),
+    target_movement={'length': 10, 'width': 120, 'azimuth': 110, 'steps': np.linspace(0, 70, 15), 'letters': Any},
+    plot_vel_on_mapview=False,
+    vel_txt: Path | None = None,
+    vel_mode='vpt',
+    vel_cmap='RdYlBu'
+):
+    """
+    catalog should at least contains the lon and lat.
+
+    """
+    # plot setting
+    fig = plt.figure(figsize=(32, 18))
+    parent_gs = GridSpec(1, 2, width_ratios=[1, 1])
+
+    geo_ax = fig.add_subplot(parent_gs[0, 0], projection=ccrs.PlateCarree())
+
+    if catalog_filter_ is None:
+        region = [
+            catalog['longitude'].min() - 0.2,
+            catalog['longitude'].max() + 0.2,
+            catalog['latitude'].min() - 0.2,
+            catalog['latitude'].max() + 0.2,
+        ]
+    else:
+        region = [
+            catalog_filter_['min_lon'],
+            catalog_filter_['max_lon'],
+            catalog_filter_['min_lat'],
+            catalog_filter_['max_lat'],
+        ]
+
+    get_mapview(region=region, ax=geo_ax, title=title, fontsize=25)
+    if plot_vel_on_mapview and vel_txt is not None:
+        vel_df = pd.read_csv(vel_txt, sep='\s+')
+        add_vel_view(
+            ax=geo_ax,
+            vel_df=vel_df,
+            region=region
+        )
+    # ax setting
+    geo_ax.set_xlim(region[0], region[1])
+    geo_ax.set_ylim(region[2], region[3])
+    # trim the catalog
+    catalog = catalog_filter(
+        catalog_df=catalog, h3dd_mode=h3dd_mode, catalog_range=catalog_filter_
+    )
+    # get the size corresponding to magnitude
+    catalog.loc[:, 'size'] = catalog['magnitude'].apply(_get_size)
+    # station
+    df_station = pd.read_csv(station)
+    # print(
+    #     'Geo Axes Patch Extent:',
+    #     geo_ax.get_window_extent(renderer=fig.canvas.get_renderer()),
+    # )
+    plot_station(
+        df_station=df_station,
+        geo_ax=geo_ax,
+        region=region,
+        plot_station_name=plot_station_name,
+        text_dist=0.005,
+    )
+    manual_elements = [
+        Line2D(
+            [0],
+            [0],
+            marker='^',
+            color='w',
+            label='Seismometer',
+            markersize=7,
+            markerfacecolor='c',
+            markeredgecolor='k',
+        ),
+    ]
+    # add all events
+    event_num = len(catalog)
+    manual_elements.append(
+        Line2D(
+            [0],
+            [0],
+            marker='o',
+            color='w',
+            label=f'Event num: {event_num}',
+            markersize=5,
+            markerfacecolor='k',
+            markeredgecolor='k',
+        )
+    )       
+    if temporal:
+        colormap = plt.cm.viridis
+        norm = mcolors.Normalize(
+            vmin=catalog['day'].min(),
+            vmax=catalog['day'].max()
+            )  # Normalize days to range [0, 1]
+        for day, group in catalog.groupby('day'):
+            print(f'day {day}: {len(group)}')
+            color = colormap(norm(day))
+            geo_ax.scatter(
+                group[f'{prefix}longitude'],
+                group[f'{prefix}latitude'],
+                s=group['size'],
+                c=color,
+                alpha=0.5,
+                label=f'Day {day} event num: {len(group)}',
+                zorder=3,
+            )
+            # Add a colorbar to indicate progression
+        sm = plt.cm.ScalarMappable(cmap=colormap, norm=norm)
+        sm.set_array([])
+        # Create an inset for the colorbar within geo_ax
+        cbar_ax = inset_axes(
+            geo_ax,  # Parent axis (geo_ax)
+            width="3%",  # Width of the colorbar relative to geo_ax
+            height="50%",  # Height of the colorbar relative to geo_ax
+            loc="lower right",  # Location inside the geo_ax
+            bbox_to_anchor=(0.05, 0.05, 0.85, 0.9),  # Adjust position within geo_ax
+            bbox_transform=geo_ax.transAxes,  # Use geo_ax coordinates
+            borderpad=0,  # Padding around the inset
+        )
+        cbar = plt.colorbar(sm, cax=cbar_ax, orientation='vertical')
+        cbar.set_label("Day Since 0401")
+    else:
+        geo_ax.scatter(
+            catalog[f'{prefix}longitude'],
+            catalog[f'{prefix}latitude'],
+            s=catalog['size'],
+            c='k',
+            alpha=0.5,
+            zorder=3,
+        )         
+
+    # profile
+    geod = Geod(ellps='WGS84')
+    if plot_profile_line:
+        # letters = string.ascii_uppercase
+        # horizontal
+        for i, (dis, letter) in enumerate(zip(horizontal_movement['steps'], horizontal_movement['letters'])):
+            next_lon, next_lat, _ = geod.fwd(horizontal_start_point[0], horizontal_start_point[1], horizontal_movement['azimuth'], dis*1000)
+            text_lon, text_lat, _ = geod.fwd(horizontal_start_point[0], horizontal_start_point[1], horizontal_movement['azimuth'], dis*1000)
+            add_profile_line(geo_ax=geo_ax, extend_km=horizontal_movement['width'], start_point=(next_lon, next_lat), azimuth=horizontal_movement['azimuth'] + 90, alpha=0.7, c='k')   
+            geo_ax.text(x=text_lon -0.02, y=text_lat, s=f"{letter}-{letter}'")
+        
+        # vertical
+        for i, (dis, letter) in enumerate(zip(vertical_movement['steps'], vertical_movement['letters'])):
+            next_lon, next_lat, _ = geod.fwd(vertical_start_point[0], vertical_start_point[1], vertical_movement['azimuth'], dis*1000)
+            text_lon, text_lat, _ = geod.fwd(vertical_start_point[0], vertical_start_point[1], vertical_movement['azimuth'], dis*1000)
+            add_profile_line(geo_ax=geo_ax, extend_km=vertical_movement['width'], start_point=(next_lon, next_lat), azimuth=vertical_movement['azimuth'] + 90, alpha=0.7, c='k')   
+            geo_ax.text(x=text_lon -0.02, y=text_lat, s=f"{letter}-{letter}'")                    
+
+    # add main eq
+    for eq in eq_list:
+        _add_epicenter(
+            x=eq[0], y=eq[1], ax=geo_ax, size=main_eq_size, alpha=0.7, color=eq[4]
+        )
+              
+        manual_elements.append(
+            Line2D(
+                [0],
+                [0],
+                marker='*',
+                color='w',
+                label=eq[3],
+                markersize=10,
+                markerfacecolor=eq[4],
+                markeredgecolor='k',
+            )
+        )
+    # geo_ax.autoscale(tight=True)
+    geo_ax.set_aspect('auto')
+    geo_ax.legend(
+        handles=manual_elements,  # + legend_elements,
+        loc='upper left',
+        markerscale=2,
+        labelspacing=1.5,
+        borderpad=1,
+        fontsize=10,
+        framealpha=0.6,
+    )
+
+    # plotting profiles
+    if profile_nums % num_rows == 0:
+        num_columns = profile_nums // num_rows
+    else:    
+        num_columns = (profile_nums // num_rows) + 1
+
+    if vel_txt is not None:
+        vel_df = pd.read_csv(vel_txt, sep='\s+')
+    outer_gs = GridSpecFromSubplotSpec(
+        num_rows,
+        num_columns,
+        subplot_spec=parent_gs[0, 1],
+    )
+    for i, (dis, letter) in enumerate(zip(target_movement['steps'], target_movement['letters'])):
+        geod = Geod(ellps='WGS84')
+        next_lon, next_lat, _ = geod.fwd(target_start_point[0], target_start_point[1], target_movement['azimuth'], dis*1000)
+        print(f'Next start point: ({next_lon}, {next_lat})')
+        add_profile_line(
+            geo_ax=geo_ax,
+            extend_km=target_movement['width'],
+            azimuth=target_movement['azimuth'] + 90,
+            start_point=(next_lon, next_lat),
+            c='yellow'
+        )
+        new_lon, new_lat, _ = geod.fwd(next_lon, next_lat, target_movement['azimuth'] + 90, (target_movement['width'] / 2)*1000)
+        new_center = (new_lon, new_lat)
+        print(f'Center point: {new_center}')
+        # plot background events
+        if other_catalog is not None:
+            other_events = project_events_to_profile(
+                df_catalog=other_catalog,
+                length=target_movement['length'], 
+                width=target_movement['width'],
+                depth_range=depth_range,
+                center=new_center,
+                azimuth=target_movement['azimuth'],
+                )                
+        profile_events = project_events_to_profile(
+            df_catalog=catalog,
+            length=target_movement['length'], 
+            width=target_movement['width'],
+            depth_range=depth_range,
+            center=new_center,
+            azimuth=target_movement['azimuth']
+            )
+        row = i % num_rows
+        col = i // num_rows
+        inner_gs = GridSpecFromSubplotSpec(
+            2,
+            3,
+            subplot_spec=outer_gs[row, col],
+            height_ratios=[1, 3],
+            width_ratios=[1, 1, 0.05]
+        )
+        # plotting topo
+        ax1 = fig.add_subplot(inner_gs[0, :-1])
+        distances, elevations = extract_topo_profile_with_geod(
+            csv_path=topo_csv,
+            start_point=(next_lon, next_lat),
+            azimuth=target_movement['azimuth']+90,
+            distance_km=target_movement['width']
+            )
+        add_topo_profile(
+            ax=ax1,
+            distances=distances,
+            elevations=elevations,
+            profile_letter=letter
+        )
+        # plotting profile
+        ax2 = fig.add_subplot(inner_gs[1, :-1])
+        cax = fig.add_subplot(inner_gs[1, -1:])
+        if vel_txt is not None:
+            #TODO: Adding a condition to solve possibly unbound.
+            add_vel_profile(
+                ax=ax2,
+                vel_df=vel_df,
+                start_point=(next_lon, next_lat),
+                mode=vel_mode,
+                cax=cax,
+                cmap=vel_cmap,
+                distance=target_movement['width'],
+                azimuth=target_movement['azimuth'] + 90
+            )
+        if other_catalog is not None:
+            add_single_profile(
+                other_events,
+                ax2,
+                temporal=False,
+                c='gray',
+                alpha=0.5,
+                width=target_movement['width'],
+                depth_range=depth_range
+                )                
+        add_single_profile(
+            profile_events,
+            ax2,
+            # manual_min=manual_min,
+            # manual_max=manual_max,
+            temporal=False,
+            c='k',
+            width=target_movement['width'],
+            depth_range=depth_range
+            )    
+    
+    if savefig and fig_dir is not None:
+        plt.tight_layout()
+        plt.savefig(fig_dir / f'{savename}.png', dpi=300, bbox_inches='tight')
