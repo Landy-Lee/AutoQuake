@@ -98,7 +98,7 @@ class DitingMotion:
         self.sampling_rate = sampling_rate
         self.type_judge = self._check_type_judge(type_judge)
         self.indices = self._get_indices()
-        self._set_thread_options()
+        # self._set_thread_options()
         self.picks = self.output_dir / 'polarity_picks.csv'
 
     def _check_type_judge(self, type_judge):
@@ -115,9 +115,20 @@ class DitingMotion:
             output.mkdir(parents=True, exist_ok=True)
             return output
 
-    def _set_thread_options(self):
-        os.environ['OMP_NUM_THREADS'] = '1'  # Adjust based on your system
-        os.environ['MKL_NUM_THREADS'] = '1'
+    # def _set_thread_options(self):
+    #     os.environ['OMP_NUM_THREADS'] = '1'  # Adjust based on your system
+    #     os.environ['MKL_NUM_THREADS'] = '1'
+    def init_worker(self):
+        """
+        Initializer for each worker in the pool. Loads the ONNX model once per process.
+        """
+        global model_session
+        session_options = ort.SessionOptions()
+        session_options.intra_op_num_threads = 1
+        session_options.inter_op_num_threads = 1
+        os.environ["OMP_NUM_THREADS"] = "4"  # Adjust based on CPU cores
+        os.environ["MKL_NUM_THREADS"] = "4"
+        model_session = ort.InferenceSession(self.model_path, sess_options=session_options)
 
     def _get_indices(self):
         df = pd.read_csv(self.gamma_picks)
@@ -169,7 +180,7 @@ class DitingMotion:
             return data
         except Exception as e:
             logging.info(
-                f'Error exist during process {sta_name}: {e}\np_arrival: {p_arrival}, data: {st[0].data}'
+                f'Error exist during process {sta_name}: {e}\np_arrival: {p_arrival}'
             )
             return []
 
@@ -320,15 +331,10 @@ class DitingMotion:
         ]
         # Iterate through the selected picks
         logging.info(f'event index: {event_index} start processing')
-        session_options = ort.SessionOptions()
-        session_options.intra_op_num_threads = 1
-        session_options.inter_op_num_threads = 1
-        ort_session = ort.InferenceSession(
-            self.model_path, sess_options=session_options
-        )
+
         processed_rows = []
         for _, row in df_selected_picks.iterrows():
-            df_row = self.process_row(row=row, motion_model=ort_session)
+            df_row = self.process_row(row=row, motion_model=model_session)
             if not df_row.empty:
                 processed_rows.append(df_row)
         logging.info(f'event index: {event_index} processing over')
@@ -343,7 +349,7 @@ class DitingMotion:
 
         # Use a process pool to parallelize the work
         logging.info('Diting motion start.')
-        with mp.Pool(processes=processes) as pool:
+        with mp.Pool(processes=processes, initializer=self.init_worker) as pool:
             results = pool.starmap(
                 self.predict, [(event_index,) for event_index in self.indices]
             )

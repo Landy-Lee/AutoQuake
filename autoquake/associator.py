@@ -37,7 +37,8 @@ class GaMMA:
         vs=6.0 / 1.75,
         vel_h=1.0,
         use_dbscan=True,
-        dbscan_min_sample=1, #3
+        dbscan_min_sample=3,
+        dbscan_eps: float | None = None,
         ncpu=35,
         ins_type='seis',
         min_picks_per_eq=8,
@@ -101,6 +102,7 @@ class GaMMA:
         self.vel_h = vel_h
         self.use_dbscan = use_dbscan
         self.dbscan_min_sample = dbscan_min_sample
+        self.dbscan_eps = dbscan_eps
         self.ncpu = ncpu
         self.ins_type = ins_type
         self.min_picks_per_eq = min_picks_per_eq
@@ -179,8 +181,11 @@ class GaMMA:
     def _check_dbscan(self, config: dict):
         if self.use_dbscan:
             config['use_dbscan'] = self.use_dbscan
-            #config['dbscan_eps'] = estimate_eps(self.df_station, config['vel']['p'])
-            config['dbscan_eps'] = 10
+            if self.dbscan_eps is None:
+                config['dbscan_eps'] = estimate_eps(self.df_station, config['vel']['p'])
+                logging.info(f"DBSCAN eps: {config['dbscan_eps']}")
+            else:
+                config['dbscan_eps'] = self.dbscan_eps
             config['dbscan_min_samples'] = self.dbscan_min_sample
             
         else:
@@ -299,8 +304,7 @@ class GaMMA:
     def run_predict(self):
         self.config_gamma()
         self.df_picks = self._check_pickings()
-        logging.info(f'picks_num: {self.df_picks.head(10)}')
-        print(f'picks_num: {self.df_picks.head(10)}')
+        # logging.info(f'picks_num: {self.df_picks.head(10)}')
         event_idx0 = 0  ## current earthquake index
         assignments = []
         
@@ -309,7 +313,7 @@ class GaMMA:
             self.df_station,
             self.config,
             event_idx0,
-            self.config['method'],
+            self.config['method']
         )
         # print(events)
         event_idx0 += len(events)

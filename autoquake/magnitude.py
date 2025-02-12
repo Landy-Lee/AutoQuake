@@ -524,7 +524,7 @@ class Magnitude:
                     tt1=tt1,
                     tt2=tt2,
                 )
-
+                print(f'{station}: {response_dict}')
                 actual_depth = depth + df_sta_picks['elevation'].iloc[0]
                 if response_dict:
                     # logging.info(f'Event: {event_index}, calculating mag for {station}')
