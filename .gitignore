@@ -9,6 +9,7 @@
 /Data_fetching
 /geo_map
 /autoquake/visualization/geo_map
+/script_to_tidy_up
 # output and some text
 
 gmt.history
@@ -36,7 +37,10 @@ retrieve_pol.py
 tutorial.ipynb
 aso.py
 focal_test.py
+autoquake_example.ipynb
+plot_example.ipynb
 plot.ipynb
+# plot.ipynb
 
 testset*
 # H3DD

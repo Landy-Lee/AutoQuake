@@ -23,6 +23,8 @@ from pyrocko import moment_tensor as pmt
 from pyrocko.plot import beachball, mpl_color
 from scipy.interpolate import griddata
 from typing import Any 
+from decimal import Decimal, ROUND_HALF_UP
+
 # ===== Sauce =====
 def add_on_utc_time(time: str, delta: float) -> str:
     """
@@ -253,10 +255,10 @@ def _merge_latest(data_path: Path, sta_name: str):
     """
     Merge the latest data from the given data path for the specified station name.
     """
-    sac_list = list(data_path.glob(f'*{sta_name}*Z*'))
+    sac_list = list(data_path.glob(f'*{sta_name}.*Z*'))
     if not sac_list:
         # logging.info(f'{sta_name} using other component')
-        sac_list = list(data_path.glob(f'*{sta_name}*'))
+        sac_list = list(data_path.glob(f'*{sta_name}.*'))
         # logging.info(f'comp_list: {sac_list}')
     stream = Stream()
     for sac_file in sac_list:
@@ -347,6 +349,15 @@ def _process_midas_scenario(time_str: str, interval=300):
     sec = total_seconds % interval
     return ymd, hdf5_index, sec
 
+def round_timestamp(timestamp: str) -> str:
+    dt = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%f")
+
+    # Convert microseconds to milliseconds with correct rounding
+    milliseconds = Decimal(dt.microsecond / 1_000_0).quantize(Decimal('1.'), rounding=ROUND_HALF_UP)
+
+    # Construct the final string with correctly rounded milliseconds
+    return dt.strftime(f"%Y-%m-%dT%H:%M:%S.{int(milliseconds):<02}")
+
 
 def preprocess_gamma_csv(
     gamma_catalog: Path, gamma_picks: Path, event_i: int, h3dd_hout=None
@@ -376,8 +387,9 @@ def preprocess_gamma_csv(
         The path of h3dd.hout
     """
     df_catalog = pd.read_csv(gamma_catalog)
+    df_catalog.loc[:, 'datetime'] = pd.to_datetime(df_catalog['time'])
+    df_catalog = df_catalog.sort_values(by='datetime', ignore_index=True)
     df_event = df_catalog[df_catalog['event_index'] == event_i].copy()
-    df_event.loc[:, 'datetime'] = pd.to_datetime(df_event['time'])
     df_event.loc[:, 'ymd'] = df_event['datetime'].dt.strftime('%Y%m%d')
     df_event.loc[:, 'hour'] = df_event['datetime'].dt.hour
     df_event.loc[:, 'minute'] = df_event['datetime'].dt.minute
@@ -390,7 +402,7 @@ def preprocess_gamma_csv(
     ] = {}  # the reason I don't want to use defaultdict is to limit it.
     event_dict['gamma'] = {
         'date': df_event['ymd'].iloc[0],
-        'event_time': df_event['time'].iloc[0],
+        'event_time': round_timestamp(df_event['time'].iloc[0]),
         'event_total_seconds': get_total_seconds(df_event['datetime'].iloc[0]),
         'event_lat': df_event['latitude'].iloc[0],
         'event_lon': df_event['longitude'].iloc[0],
@@ -403,7 +415,7 @@ def preprocess_gamma_csv(
         df_h3dd['datetime'] = pd.to_datetime(df_h3dd['time'])
         df_h3dd['datetime'].map(get_total_seconds)
 
-        h3dd_index = df_event['h3dd_event_index'].iloc[0]
+        h3dd_index = df_event.index[0]
         df_h3dd = df_h3dd.iloc[h3dd_index]
         event_dict['h3dd'] = {
             'event_time': df_h3dd['time'],
@@ -413,7 +425,7 @@ def preprocess_gamma_csv(
             'event_point': (df_h3dd['latitude'], df_h3dd['longitude']),
             'event_depth': df_h3dd['depth_km'],
         }
-
+    print(event_dict)
     df_picks = pd.read_csv(gamma_picks)
     df_event_picks = df_picks[df_picks['event_index'] == event_i].copy()
     # TODO: does there have any possible scenario?
@@ -424,7 +436,7 @@ def preprocess_gamma_csv(
 
 
 def _preprocess_phasenet_csv(
-    phasenet_picks: Path, starttime: str | None = None, endtime: str | None = None, get_station=lambda x: str(x).split('.')[1]
+    phasenet_picks: Path, get_station, starttime: str | None = None, endtime: str | None = None
 ) -> pd.DataFrame:
     """## Preprocess the phasenet_csv
     Using get_station to retrieve the station name in station_id column.
@@ -604,15 +616,44 @@ def find_das_data(
         }
     return das_plot_dict
 
+def calculate_3d_distance(
+    event_lon: float,
+    event_lat: float,
+    event_depth: float,
+    sta_lon: float,
+    sta_lat: float,
+    sta_elevation: float
+):
+    """
+    Calculate the 3D distance between two points given lon, lat, and depth.
+
+    Returns:
+        3D distance in km.
+    """
+    geod = Geod(ellps='WGS84')
+    # Calculate 2D geodetic distance
+    _, _, distance_2d = geod.inv(sta_lon, sta_lat, event_lon, event_lat)
+
+    # Calculate the depth difference
+    depth_diff = event_depth + sta_elevation / 1000
+
+    # Calculate 3D distance using Pythagoras theorem
+    distance_3d = math.sqrt((distance_2d / 1000) ** 2 + depth_diff**2)
+
+    return distance_3d
 
 def find_sac_data(
     event_time: str,
     date: str,  # redundant, but already do it in previous function, temp pass.
-    event_point: tuple[float, float],
+    event_lon: float,
+    event_lat: float,
+    event_depth: float,
     station: Path,
     sac_parent_dir: Path,
     amplify_index: float,
-    station_mask=station_mask,
+    station_mask,
+    pretime,
+    posttime,
 ) -> dict:
     """
     ## Retrieve the waveform from SAC.
@@ -623,44 +664,52 @@ def find_sac_data(
 
     This is for plotting association plot!
     """
-    starttime_trim = UTCDateTime(event_time) - 30
-    endtime_trim = UTCDateTime(event_time) + 60
-
+    starttime_trim = UTCDateTime(event_time) + pretime
+    endtime_trim = UTCDateTime(event_time) + posttime
+    # logging.info(f'time period{starttime_trim, endtime_trim}')
     df_station = pd.read_csv(station)
     df_station = df_station[df_station['station'].map(station_mask)]
 
     sac_path = sac_parent_dir / date
     sac_dict = {}
+    #TODO: This is not a good way, taking more time to go through all station.
     for sta in df_station['station'].to_list():
         # glob the waveform
 
         st = _merge_latest(data_path=sac_path, sta_name=sta)
-        print(st)
+        if len(st) == 0:
+            continue
+        # logging.info(f'!BEFORE TRIM!{st}')
         st.taper(type='hann', max_percentage=0.05)
         st.filter('bandpass', freqmin=1, freqmax=10)
         try:
             st[0].trim(starttime=starttime_trim, endtime=endtime_trim)
         except Exception as e:
-            print(f'Trimming error in find_sac_data: {e}')
+            logging.info(f'Trimming error in {sta} find_sac_data: {e}')
             continue
         sampling_rate = 1 / st[0].stats.sampling_rate
         time_sac = np.arange(
-            0, 90 + sampling_rate, sampling_rate
+            0, (posttime - pretime) + sampling_rate, sampling_rate
         )  # using array to ensure the time length as same as time_window.
         x_len = len(time_sac)
-        try:
-            data_sac_raw = st[0].data / max(st[0].data)  # normalize the amplitude.
-        except Exception as e:
-            logging.info(f'Error: {e} at {sta} in find_sac_data')
-            logging.info(f'check the {sta} length of given time: {len(st[0].data)}')
-            continue
+        # try:
+        # logging.info(f'{st}')
+        data_sac_raw = st[0].data / max(st[0].data)  # normalize the amplitude.
+        # except Exception as e:
+        #     logging.info(f'Error: {e} at {sta} in find_sac_data')
+        #     continue
 
-        sta_point = (
-            df_station[df_station['station'] == sta]['latitude'].iloc[0],
-            df_station[df_station['station'] == sta]['longitude'].iloc[0],
+        sta_lon = df_station[df_station['station'] == sta]['longitude'].iloc[0]
+        sta_lat = df_station[df_station['station'] == sta]['latitude'].iloc[0]
+        sta_elevation = df_station[df_station['station'] == sta]['elevation'].iloc[0]
+        dist = calculate_3d_distance(
+            event_lon=event_lon, event_lat=event_lat, event_depth=event_depth,
+            sta_lon=sta_lon, sta_lat=sta_lat, sta_elevation=sta_elevation
         )
-        dist = _cal_dist(event_point=event_point, sta_point=sta_point)
+        # dist = _cal_dist(event_point=event_point, sta_point=sta_point)
         data_sac_raw = data_sac_raw * amplify_index + dist
+        # logging.info(f'{sta} sac length: {len(data_sac_raw)}')
+        # logging.info(f'{sta} time length: {x_len} with sampling rate {sampling_rate}')
         # we might have the data lack in the beginning:
         if starttime_trim < st[0].stats.starttime:
             data_sac = np.pad(
@@ -670,19 +719,19 @@ def find_sac_data(
                 constant_values=np.nan,
             )  # adding the Nan to ensure the data length as same as time window.
         else:
-            try:
-                data_sac = np.pad(
-                    data_sac_raw,
-                    (0, x_len - len(data_sac_raw)),
-                    mode='constant',
-                    constant_values=np.nan,
-                )  # adding the Nan to ensure the data length as same as time window.
-            except Exception as e:
-                logging.error(
-                    f'Padding value: {x_len} (x_len) - {len(data_sac_raw)} (data_sac_raw)'
-                )
-                logging.error(f'Error: {e} during concat in {sta}')
-                continue  # TODO: Check is it suitalbe? I think existing this exception is weird.
+            # try:
+            data_sac = np.pad(
+                data_sac_raw,
+                (0, x_len - len(data_sac_raw)),
+                mode='constant',
+                constant_values=np.nan,
+            )  # adding the Nan to ensure the data length as same as time window.
+            # except Exception as e:
+            #     logging.error(
+            #         f'{sta} Padding value: {x_len} (x_len) - {len(data_sac_raw)} (data_sac_raw)'
+            #     )
+            #     logging.error(f'Error: {e} during concat in {sta}')
+                
         sac_dict[str(sta)] = {
             'time': time_sac,
             'sac_data': data_sac,
@@ -735,10 +784,10 @@ def _find_phasenet_das_pick(
     starttime: str,
     endtime: str,
     df_picks: pd.DataFrame,  # why this place using dataframe? because we don't want to read it several time.
+    station_mask,
     dx=4.084,
     dt=0.01,
     das_time_interval=300,
-    station_mask=station_mask,
 ):
     """
     Filtering waveform in specific time window and convert it for scatter plot.
@@ -750,6 +799,8 @@ def _find_phasenet_das_pick(
     _, _, start_sec = _process_midas_scenario(starttime, interval=das_time_interval)
 
     df_das_picks = df_picks[~df_picks['station'].map(station_mask)]
+    if df_das_picks.empty:
+        return pd.DataFrame()
     # df_das_picks['channel_index'] = df_das_picks['station'].map(
     #     convert_channel_index
     # )
@@ -765,10 +816,10 @@ def _find_phasenet_seis_pick(
     starttime: str,
     endtime: str,
     df_picks: pd.DataFrame,  # why this place using dataframe? because we don't want to read it several time.
+    station_mask,
     sac_dict={},
     picking_check=True,
-    asso_check=False,
-    station_mask=station_mask,
+    asso_check=False
 ):
     """
     Filtering waveform in specific time window and convert it for scatter plot.
@@ -1749,7 +1800,7 @@ def _add_das_picks(
         df_phasenet_picks = _find_phasenet_das_pick(
             starttime=starttime, endtime=endtime,
             df_picks=df_phasenet_picks, das_time_interval=interval,
-            dt=dt, dx=dx
+            dt=dt, dx=dx, station_mask=station_mask
         )
         main_ax.scatter(
             df_phasenet_picks[df_phasenet_picks['phase_type'] == 'P']['x'],
@@ -1962,7 +2013,7 @@ def plot_waveform_check(
 
 def plot_station(
     df_station: pd.DataFrame,
-    geo_ax,
+    geo_ax: Axes,
     region,
     color=None,
     plot_station_name=False,
@@ -2011,7 +2062,7 @@ def plot_station(
                 if not (region[0] <= x <= region[1]) or not (
                     region[2] <= y <= region[3]
                 ):
-                    print(f'Removing text: {s}')
+                    logging.info(f'Removing text: {s}')
                 else:
                     geo_ax.text(
                         x=x + text_dist,
@@ -2250,7 +2301,7 @@ def add_beachballs(gafocal_txt: Path, ax, on='mapview'):
         )
 
 
-def add_single_beachball(ax, strike: int, dip: int, rake: int, x, y, size=20, zorder=6):
+def add_single_beachball(ax, strike: int, dip: int, rake: int, x: float, y: float, size=20, zorder=6):
     """
     Adding single beachball on the map
     """
@@ -2374,7 +2425,7 @@ def _generate_profile_points(start_point, azimuth, distance, dist_interval):
     distances = np.arange(0, distance*1000, dist_interval*1000)  # Convert km to meters
     if distances[-1] != distance*1000:
         distances = np.append(distances, distance*1000)
-    print(distances)
+    logging.info(f'Distances: {distances}')
     # Compute profile points
     lon, lat = start_point
     profile_points = [geod.fwd(lon, lat, azimuth, dist)[:2] for dist in distances]
@@ -2390,6 +2441,7 @@ def add_vel_profile(
         depth_range=(0, 60),
         mode='vpt',        
         cmap='RdYlBu',
+        interpolate_mothod='linear',
         cax: Axes | None = None
 ):
     """
@@ -2397,16 +2449,6 @@ def add_vel_profile(
 
     Args:
         ax (Axes): Matplotlib Axes object for plotting.
-        csv_file (str): Path to the CSV file containing the velocity model.
-        start_point (tuple): Start point of the profile (lon, lat).
-        mode (str): 'vpt', 'vst', 'vpvst'
-        distance (float): Total distance of the profile in kilometers.
-        azimuth (float): Azimuth (direction) in degrees (clockwise from north).
-        dist_interval (float): Distance interval between points in kilometers.
-        depth_range (tuple): Depth range for the profile (min_depth, max_depth).
-        depth_step (float): Step size for regular depth grid (km).
-        vmin (float): Minimum value for the color scale.
-        vmax (float): Maximum value for the color scale.
     """
     # Load data from CSV
     df = vel_df
@@ -2419,33 +2461,43 @@ def add_vel_profile(
     depth_subset = depth_array[(depth_array >= depth_range[0]) & (depth_array <= depth_range[1])]
 
     # Create velocity grid
-    velocity_grid = np.full((len(depth_subset), len(profile_points)), np.nan)
+    # if interpolate_mode == 'mean': # NEAREST method handcraft
+    #     velocity_grid = np.full((len(depth_subset), len(profile_points)), np.nan)
 
-    for i, (lon, lat) in enumerate(profile_points):
-        point_data = df[
-            (df['lon'].between(lon - 0.04, lon + 0.04)) &
-            (df['lat'].between(lat - 0.04, lat + 0.04))
-        ]
-        if not point_data.empty:
-            for j, depth in enumerate(depth_subset):
-                depth_data = point_data[point_data['dep'] == depth]
-                if not depth_data.empty:
-                    velocity_grid[j, i] = depth_data[mode].mean()
+    #     for i, (lon, lat) in enumerate(profile_points):
+    #         point_data = df[
+    #             (df['lon'].between(lon - 0.04, lon + 0.04)) &
+    #             (df['lat'].between(lat - 0.04, lat + 0.04))
+    #         ]
+    #         if not point_data.empty:
+    #             for j, depth in enumerate(depth_subset):
+    #                 depth_data = point_data[point_data['dep'] == depth]
+    #                 if not depth_data.empty:
+    #                     velocity_grid[j, i] = depth_data[mode].mean()
 
+    points = df[['lon', 'lat', 'dep']].values  # Known (lon, lat, depth) points
+    values = df[mode].values             # Known velocity values
+    lon_lat_depth_grid = [
+        (lon, lat, depth) for depth in depth_subset for lon, lat in profile_points
+    ]
+    grid_points = np.array(lon_lat_depth_grid)
+    interpolated_values = griddata(points, values, grid_points, method=interpolate_mothod)
+    velocity_grid = interpolated_values.reshape(len(depth_subset), len(profile_points))
     # Plot velocity profile
     distances = np.arange(0, distance, dist_interval)  # Convert km to meters
     if distances[-1] != distance:
         distances = np.append(distances, distance)
 
     min_max_map = {
-        'vpt': (-30, 30),
-        'vst': (-25, 25),
-        'vpvst': (-25, 25)
+        'vpt': (-30, 30, cmap),
+        'vst': (-25, 25, cmap),
+        'vpvst': (-25, 25, f'{cmap}_r')
     }
 
     levels = np.linspace(min_max_map[mode][0], min_max_map[mode][1], 21)
     contourf = ax.contourf(
-        distances, depth_subset, velocity_grid, levels=levels, cmap=cmap, vmin=min_max_map[mode][0], vmax=min_max_map[mode][1]
+        distances, depth_subset, velocity_grid, levels=levels,
+        cmap=min_max_map[mode][2], vmin=min_max_map[mode][0], vmax=min_max_map[mode][1]
     )
     if cax is not None:
         cbar = plt.colorbar(contourf, cax=cax)
