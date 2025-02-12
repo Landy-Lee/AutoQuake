@@ -37,6 +37,8 @@ def add_on_utc_time(time: str, delta: float) -> str:
     """
     # Parse the string into a datetime object
     utc_time = datetime.strptime(time, '%Y-%m-%dT%H:%M:%S.%f')
+    #utc_time = datetime.strptime(time.replace(" ", "T"), '%Y-%m-%dT%H:%M:%S.%f')
+
 
     # Add or subtract the time delta
     adjusted_time = utc_time + timedelta(seconds=delta)
@@ -96,20 +98,27 @@ def h3dd_time_trans(x: str):
     return int(x[:2]) * 3600 + int(x[2:4]) * 60 + int(x[4:6]) + float(f'0.{x[6:]}')
 
 
-def convert_channel_index(sta_name: str) -> int:
+def convert_channel_index(sta_name: str, mode='chiayi') -> int:
     """Convert first character of channel from alpha to digit for indexing."""
-    if sta_name[:1] == 'A':
-        channel_index = int(sta_name[1:])
-    elif sta_name[:1] == 'B':
-        channel_index = int(f'1{sta_name[1:]}')
+    if mode == 'chiayi':
+        channel_index = int(sta_name)
     else:
-        print('wrong format warning: please append the condition')
+        if sta_name[:1] == 'A':
+            channel_index = int(sta_name[1:])
+        elif sta_name[:1] == 'B':
+            channel_index = int(f'1{sta_name[1:]}')
+        else:
+            print('wrong format warning: please append the condition')
     return channel_index
 
 
-def station_mask(x: str):
-    """Pattern to distinguish the DAS and Seismometer station."""
-    return x[1].isalpha()
+# def station_mask(x: str):
+#     """Pattern to distinguish the DAS and Seismometer station."""
+#     return x[1].isalpha()
+def station_mask(x):
+    # x = str(x)  # 轉成字串
+    return x[0].isalpha()  
+
 
 
 def dmm_trans(coord: str):
@@ -414,7 +423,7 @@ def preprocess_gamma_csv(
             'event_depth': df_h3dd['depth_km'],
         }
 
-    df_picks = pd.read_csv(gamma_picks)
+    df_picks = pd.read_csv(gamma_picks, dtype={'station_id': str})
     df_event_picks = df_picks[df_picks['event_index'] == event_i].copy()
     # TODO: does there have any possible scenario?
     # df_event_picks['station_id'] = df_event_picks['station_id'].map(lambda x: str(x).split('.')[1])
@@ -424,12 +433,13 @@ def preprocess_gamma_csv(
 
 
 def _preprocess_phasenet_csv(
-    phasenet_picks: Path, starttime: str | None = None, endtime: str | None = None, get_station=lambda x: str(x).split('.')[1]
+    #phasenet_picks: Path, starttime: str | None = None, endtime: str | None = None, get_station=lambda x: str(x).split('.')[1]
+    phasenet_picks: Path, starttime: str | None = None, endtime: str | None = None, get_station=lambda x: x if '.' not in str(x) else str(x).split('.')[1] 
 ) -> pd.DataFrame:
     """## Preprocess the phasenet_csv
     Using get_station to retrieve the station name in station_id column.
     """
-    df_all_picks = pd.read_csv(phasenet_picks)
+    df_all_picks = pd.read_csv(phasenet_picks, dtype={'station_id': str})
     df_all_picks['phase_time'] = pd.to_datetime(df_all_picks['phase_time'])
     if starttime is not None and endtime is not None:
         df_all_picks = df_all_picks[(df_all_picks['phase_time']>=pd.Timestamp(starttime)) & (df_all_picks['phase_time']<=pd.Timestamp(endtime))]
@@ -437,10 +447,20 @@ def _preprocess_phasenet_csv(
     # df_all_picks['system'] = df_all_picks['station_id'].apply(
     #     lambda x: str(x).split('.')[0]
     # )  # TW or MiDAS blablabla
-    df_all_picks['station'] = df_all_picks['station_id'].apply(
+    #print(df_all_picks.columns) 
+    df_all_picks['station'] = df_all_picks['station_id'].apply(  #seis
+    #df_all_picks['station'] = df_all_picks['channel_index'].astype(str).apply(  #DAS
         get_station
     )  # LONT (station name) or A001 (channel name)
+    #print(df_all_picks.head())  
     return df_all_picks
+
+    # df_all_picks['station'] = df_all_picks.apply(
+    # lambda row: get_station(row['station_id']) if any(c.isalpha() for c in str(row['station_id'])) 
+    # else get_station(str(row['channel_index'])), 
+    # axis=1
+    # )
+    # return df_all_picks
 
 
 def _process_polarity(
@@ -627,8 +647,10 @@ def find_sac_data(
     endtime_trim = UTCDateTime(event_time) + 60
 
     df_station = pd.read_csv(station)
+    print("df_station columns:", df_station.columns)
+    print(df_station.head())
     df_station = df_station[df_station['station'].map(station_mask)]
-
+   
     sac_path = sac_parent_dir / date
     sac_dict = {}
     for sta in df_station['station'].to_list():
@@ -781,6 +803,7 @@ def _find_phasenet_seis_pick(
     start_total_seconds = get_total_seconds(start_datetime)
 
     df_seis_picks = df_picks[df_picks['station'].map(station_mask)]
+    print(df_seis_picks.head(2))
     df_seis_picks['x'] = (
         df_seis_picks['total_seconds'] - start_total_seconds
     )  # Because we use -30 as start.
@@ -1288,6 +1311,7 @@ def process_tt_table(station_csv: Path, tt_table: Path, gafocal_index_list=[]):
     df = merged_df[['station', 'az', 'tkof', 'gafocal_index']].copy()
     df.rename(columns={'az': 'azimuth', 'tkof': 'takeoff_angle'}, inplace=True)
     df = df[~df['station'].map(station_mask)]
+    print(station_mask)
     if len(gafocal_index_list) != 0:
         df = df[df['gafocal_index'].isin(gafocal_index_list)]
     return df
@@ -1568,7 +1592,7 @@ def _plot_seis(
     df_phasenet_picks: pd.DataFrame,
     df_gamma_picks: pd.DataFrame,
     ax,
-    bar_length=2,
+    bar_length=0.7,
 ):
     """
     plot the seismometer waveform for check.
@@ -1693,7 +1717,8 @@ def _add_das_picks(
         for win in window:
             ymd = win.split(':')[0]
             index_file_name = win.split(':')[1]
-            file = list((h5_parent_dir / f'{ymd}_hdf5').glob(f'*{index_file_name}'))[0]
+            #file = list((h5_parent_dir / f'{ymd}_hdf5').glob(f'*{index_file_name}'))[0]
+            file = list((h5_parent_dir / f'{ymd}').glob(f'*{index_file_name}'))[0]
             if not file:
                 raise IndexError(f'File not found for window {win}')
             try:
@@ -1720,6 +1745,10 @@ def _add_das_picks(
         # Concatenate all data arrays along the second axis (horizontally)
         concatenated_data = np.concatenate(all_data, axis=1)
         # logging.info(f'Concatenated data shape: {concatenated_data.shape}')
+    else:
+        print("警告：all_data 是空的！")
+        concatenated_data = np.empty((0, 0))
+
     nx, nt = concatenated_data.shape
     x = np.arange(nx) * dx
     t = np.arange(nt) * dt
@@ -1813,7 +1842,7 @@ def _add_das_picks(
 
 
 # ===== get function =====
-def get_mapview(region: list, ax: GeoAxes, title='Map', use_fault=True, **kwargs):
+def get_mapview(region: list, ax: GeoAxes, title='Map', use_fault=False, **kwargs):
     """## Plotting the basic map.
 
     Notice here, the ax should be a GeoAxes! A subclass of `matplotlib.axes.Axes`.
@@ -1840,8 +1869,8 @@ def get_mapview(region: list, ax: GeoAxes, title='Map', use_fault=True, **kwargs
         rasterized=True,
     )
     # cartopy setting
-    # ax.coastlines()
-    add_tw_coast(ax, tw_coast)
+    ax.coastlines()
+    # add_tw_coast(ax, tw_coast)
     if use_fault:
         add_fault(ax)
     ax.set_extent(region)
@@ -1949,6 +1978,9 @@ def plot_waveform_check(
         and df_das_phasenet_picks is not None
         and h5_parent_dir is not None
     ):
+        print('')
+        print('dasdasdasdasdas')
+        print('')
         _add_das_picks(
             starttime=starttime,
             endtime=end_time,

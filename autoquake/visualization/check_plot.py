@@ -60,6 +60,7 @@ from ._plot_base import (
     add_topo_profile
 )
 
+df_seis_station = pd.DataFrame()  # 確保地震站(Seismic station)是空的
 
 def _find_asso_map(df_seis_station: pd.DataFrame, df_das_station: pd.DataFrame):
     """## return a code for map setting."""
@@ -86,6 +87,7 @@ def plot_asso_map(
     use_gamma=True,
     use_h3dd=False,
     station_mask=station_mask,
+    station_s=30
 ):
     """
     ## This is the map for plotting association.
@@ -114,7 +116,8 @@ def plot_asso_map(
         get_mapview(
             main_region,
             main_ax,
-            title=f"GDMS: {event_dict['h3dd']['event_time']}\nLat: {event_dict['h3dd']['event_lat']} Lon: {event_dict['h3dd']['event_lon']} depth: {event_dict['h3dd']['event_depth']}",
+            use_fault=False,
+            title=f"{event_dict['gamma']['event_time']}\nLat: {event_dict['gamma']['event_lat']} Lon: {event_dict['gamma']['event_lon']} depth: {event_dict['gamma']['event_depth']}",
         )
         main_ax.scatter(
             x=df_seis_station['longitude'],
@@ -122,7 +125,7 @@ def plot_asso_map(
             marker='^',
             color='silver',
             edgecolors='k',
-            s=50,
+            s=station_s,
             zorder=2,
         )
         if use_gamma and event_dict is not None:
@@ -156,7 +159,7 @@ def plot_asso_map(
                     marker='^',
                     color='darkorange',
                     edgecolors='k',
-                    s=50,
+                    s=station_s,
                     zorder=3,
                 )
         seis_gl = main_ax.gridlines(draw_labels=True)
@@ -249,6 +252,8 @@ def plot_asso(
     das_region=None,
     pretime=-30,
     posttime=60,
+    use_das=False,
+    station_s=30
 ):
     """
     ## Plotting the gamma and h3dd info.
@@ -297,9 +302,9 @@ def plot_asso(
     save_name = f'event_{event_i}_{time_str}.png'
 
     # Check if this event has already been processed
-    if (fig_dir / save_name).exists():
-        logging.info(f'Skipping event {event_i}: file already exists.')
-        return  # Skip processing for this event
+    # if (fig_dir / save_name).exists():
+    #     print(f'Skipping event {event_i}: file already exists.')
+    #     return  # Skip processing for this event
     # figure setting
     fig = plt.figure()
     map_proj = ccrs.PlateCarree()
@@ -335,15 +340,18 @@ def plot_asso(
     else:
         das_map_ax = None
         das_waveform_ax = None
-
+    
     starttime = add_on_utc_time(df_event['time'].iloc[0], pretime)
     endtime = add_on_utc_time(df_event['time'].iloc[0], posttime)
-
-    df_das_phasenet_picks = _find_phasenet_das_pick(
-        starttime=starttime,
-        endtime=endtime,
-        df_picks=df_phasenet_picks,
-    )
+    if use_das:
+        df_das_phasenet_picks = _find_phasenet_das_pick(
+            starttime=starttime,
+            endtime=endtime,
+            df_picks=df_phasenet_picks,
+        )
+        print(df_das_phasenet_picks.head(1))
+    else:
+        df_das_phasenet_picks = pd.DataFrame()
     df_seis_phasenet_picks = _find_phasenet_seis_pick(
         starttime=starttime,
         endtime=endtime,
@@ -358,6 +366,7 @@ def plot_asso(
         event_total_seconds=event_dict['gamma']['event_total_seconds'],
         station_mask=station_mask,
     )
+    print(df_das_phasenet_picks.head(1))
     plot_waveform_check(
         sac_dict=sac_dict,
         starttime=starttime,
@@ -382,6 +391,7 @@ def plot_asso(
         station_mask=station_mask,
         main_region=seis_region,
         sub_region=das_region,
+        station_s=station_s
     )
 
     plt.tight_layout()
@@ -395,10 +405,13 @@ def parallel_plot_asso(
     gamma_picks: Path,
     station: Path,
     fig_dir: Path,
-    h3dd_hout: Path,
     sac_parent_dir: Path,
+    h3dd_hout: Path | None = None,
     h5_parent_dir: Path | None = None,
     processes=10,
+    amplify_index=1,
+    seis_region=None,
+    station_s=30
 ):
     fig_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -412,12 +425,25 @@ def parallel_plot_asso(
     df_phasenet_picks = _preprocess_phasenet_csv(
         phasenet_picks, get_station=lambda x: x
     )
-    partial_plot_asso = partial(
-        plot_asso,
-        h3dd_hout=h3dd_hout,
-        sac_parent_dir=sac_parent_dir,
-        h5_parent_dir=h5_parent_dir,
-    )
+    if h3dd_hout is not None:
+        partial_plot_asso = partial(
+            plot_asso,
+            h3dd_hout=h3dd_hout,
+            sac_parent_dir=sac_parent_dir,
+            h5_parent_dir=h5_parent_dir,
+            amplify_index=amplify_index,
+            seis_region=seis_region,
+            station_s=station_s
+        )
+    else:
+        partial_plot_asso = partial(
+            plot_asso,
+            sac_parent_dir=sac_parent_dir,
+            h5_parent_dir=h5_parent_dir,
+            amplify_index=amplify_index,
+            seis_region=seis_region,
+            station_s=station_s
+        )        
     with mp.Pool(processes=processes) as pool:
         pool.starmap(
             partial_plot_asso,

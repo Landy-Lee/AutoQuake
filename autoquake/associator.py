@@ -22,13 +22,13 @@ class GaMMA:
         station: Path,
         pickings: Path,
         result_path=None,
-        picking_name_extract=lambda x: x.split('.')[1],
+        picking_name_extract=lambda x: x,#x.split('.')[1],
         center=None,
         xlim_degree: list | None = None,
-        x_interval=3.0,
+        x_interval=1.0, #3
         ylim_degree: list | None = None,
-        y_interval=3.0,
-        zlim=(0, 60),
+        y_interval=1.0, #3
+        zlim=(0, 50),
         degree2km=111.32,
         method='BGMM',
         use_amplitude=False,
@@ -37,12 +37,12 @@ class GaMMA:
         vs=6.0 / 1.75,
         vel_h=1.0,
         use_dbscan=True,
-        dbscan_min_sample=3,
+        dbscan_min_sample=1, #3
         ncpu=35,
         ins_type='seis',
         min_picks_per_eq=8,
-        min_p_picks_per_eq=6,
-        min_s_picks_per_eq=2,
+        min_p_picks_per_eq=6, #6
+        min_s_picks_per_eq=2,#2
         covariance_prior: list | None = None,
         max_sigma11=2.0,
         max_sigma22=1.0,
@@ -131,19 +131,33 @@ class GaMMA:
         """
         df = pd.read_csv(self.pickings)
         if self.picking_name_extract is not None:
-            df['station_id'] = df['station_id'].map(self.picking_name_extract)
-
+            if self.ins_type == 'DAS':
+                df['channel_index'] = df['channel_index'].map(self.picking_name_extract)
+            else:
+                df['station_id'] = df['station_id'].map(self.picking_name_extract)
+            
         if self.use_amplitude:
             df[df['amp'] != -1]
-        df.rename(
-            columns={
-                'station_id': 'id',
-                'phase_time': 'timestamp',
-                'phase_type': 'type',
-                'phase_score': 'prob',
-            },
+        if self.ins_type == 'DAS':
+            df.rename(
+                columns={
+                    'channel_index': 'id',  # 保留原始欄位
+                    'phase_time': 'timestamp',
+                    'phase_type': 'type',
+                    'phase_score': 'prob',
+                },
             inplace=True,
-        )
+            )
+        else:
+            df.rename(
+                columns={
+                    'station_id': 'id',
+                    'phase_time': 'timestamp',
+                    'phase_type': 'type',
+                    'phase_score': 'prob',
+                },
+                inplace=True,
+            )
         return df
 
     def _result_dir(self, result_path):
@@ -165,8 +179,10 @@ class GaMMA:
     def _check_dbscan(self, config: dict):
         if self.use_dbscan:
             config['use_dbscan'] = self.use_dbscan
-            config['dbscan_eps'] = estimate_eps(self.df_station, config['vel']['p'])
+            #config['dbscan_eps'] = estimate_eps(self.df_station, config['vel']['p'])
+            config['dbscan_eps'] = 10
             config['dbscan_min_samples'] = self.dbscan_min_sample
+            
         else:
             config['use_dbscan'] = False
 
@@ -284,8 +300,10 @@ class GaMMA:
         self.config_gamma()
         self.df_picks = self._check_pickings()
         logging.info(f'picks_num: {self.df_picks.head(10)}')
+        print(f'picks_num: {self.df_picks.head(10)}')
         event_idx0 = 0  ## current earthquake index
         assignments = []
+        
         events, assignments = association(
             self.df_picks,
             self.df_station,
@@ -293,6 +311,7 @@ class GaMMA:
             event_idx0,
             self.config['method'],
         )
+        # print(events)
         event_idx0 += len(events)
         logging.info(f'event_num: {event_idx0}')
         ## create catalogs
@@ -320,16 +339,28 @@ class GaMMA:
             .fillna(-1)
             .astype({'event_index': int})
         )
-        picks.rename(
-            columns={
-                'id': 'station_id',
-                'timestamp': 'phase_time',
-                'type': 'phase_type',
-                'prob': 'phase_score',
-                'amp': 'phase_amplitude',
-            },
-            inplace=True,
-        )
+        if self.ins_type == 'DAS':
+            picks.rename(
+                columns={
+                    'id': 'channel_index',
+                    'timestamp': 'phase_time',
+                    'type': 'phase_type',
+                    'prob': 'phase_score',
+                    'amp': 'phase_amplitude',
+                },
+                inplace=True,
+            )
+        else:
+            picks.rename(
+                columns={
+                    'id': 'station_id',
+                    'timestamp': 'phase_time',
+                    'type': 'phase_type',
+                    'prob': 'phase_score',
+                    'amp': 'phase_amplitude',
+                },
+                inplace=True,
+            )
         picks.to_csv(
             self.result_path / 'gamma_picks.csv',
             index=False,
@@ -343,7 +374,7 @@ class GaMMA:
 
         # Filter DAS and seismic picks
         das_picks = filtered_picks[
-            filtered_picks['station_id'].map(lambda x: x[1].isdigit())
+            filtered_picks['channel_index'].map(lambda x: x[1].isdigit())
         ]
         seis_picks = filtered_picks[
             filtered_picks['station_id'].map(lambda x: x[1].isalpha())
