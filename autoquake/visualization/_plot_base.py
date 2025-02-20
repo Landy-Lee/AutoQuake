@@ -264,10 +264,11 @@ def _merge_latest(data_path: Path, sta_name: str):
     """
     Merge the latest data from the given data path for the specified station name.
     """
-    sac_list = list(data_path.glob(f'*{sta_name}.*Z*'))
+    #TODO: Glob sac data in a smarter way.
+    sac_list = list(data_path.glob(f'*{sta_name}*Z*'))
     if not sac_list:
         # logging.info(f'{sta_name} using other component')
-        sac_list = list(data_path.glob(f'*{sta_name}.*'))
+        sac_list = list(data_path.glob(f'*{sta_name}*'))
         # logging.info(f'comp_list: {sac_list}')
     stream = Stream()
     for sac_file in sac_list:
@@ -350,13 +351,25 @@ def catalog_filter(
 # ===== preprocess function =====
 
 
-def _process_midas_scenario(time_str: str, interval=300):
+def _process_scenario(time_str: str, interval=150):
     datetime = pd.to_datetime(time_str)
     ymd = f'{datetime.year}{datetime.month:>02}{datetime.day:>02}'
     total_seconds = get_total_seconds(datetime)
     hdf5_index = int(total_seconds // interval)
     sec = total_seconds % interval
     return ymd, hdf5_index, sec
+    
+    
+
+# for chiayi data
+# def _process_midas_scenario(time_str: str, interval=150, offset=15):
+#     datetime = pd.to_datetime(time_str)
+#     ymd = f'{datetime.year}{datetime.month:>02}{datetime.day:>02}'
+#     total_seconds = get_total_seconds(datetime) - offset    
+#     hdf5_index = int(total_seconds // interval)
+#     sec = total_seconds % interval + offset  
+#     return ymd, hdf5_index, sec
+
 
 def round_timestamp(timestamp: str) -> str:
     dt = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%f")
@@ -445,7 +458,8 @@ def preprocess_gamma_csv(
 
 
 def _preprocess_phasenet_csv(
-    phasenet_picks: Path, get_station, starttime: str | None = None, endtime: str | None = None
+    #phasenet_picks: Path, get_station, starttime: str | None = None, endtime: str | None = None
+    phasenet_picks: Path, starttime: str | None = None, endtime: str | None = None, get_station=lambda x: str(x).split('.')[1]
 ) -> pd.DataFrame:
     """## Preprocess the phasenet_csv
     Using get_station to retrieve the station name in station_id column.
@@ -463,7 +477,7 @@ def _preprocess_phasenet_csv(
     #df_all_picks['station'] = df_all_picks['channel_index'].astype(str).apply(  #DAS
         get_station
     )  # LONT (station name) or A001 (channel name)
-    #print(df_all_picks.head())  
+    print(df_all_picks.head())  
     return df_all_picks
 
     # df_all_picks['station'] = df_all_picks.apply(
@@ -687,10 +701,10 @@ def find_sac_data(
     endtime_trim = UTCDateTime(event_time) + posttime
     # logging.info(f'time period{starttime_trim, endtime_trim}')
     df_station = pd.read_csv(station)
-    print("df_station columns:", df_station.columns)
-    print(df_station.head())
+    # print("df_station columns:", df_station.columns)
+    # print(df_station.head())
     df_station = df_station[df_station['station'].map(station_mask)]
-   
+    
     sac_path = sac_parent_dir / date
     sac_dict = {}
     #TODO: This is not a good way, taking more time to go through all station.
@@ -817,7 +831,7 @@ def _find_phasenet_das_pick(
         (df_picks['phase_time'] >= pd.Timestamp(starttime))
         & (df_picks['phase_time'] <= pd.Timestamp(endtime))
     ]
-    _, _, start_sec = _process_midas_scenario(starttime, interval=das_time_interval)
+    _, _, start_sec = _process_scenario(starttime, interval=das_time_interval)
 
     df_das_picks = df_picks[~df_picks['station'].map(station_mask)]
     if df_das_picks.empty:
@@ -1745,20 +1759,35 @@ def _add_das_picks(
     df_das_gamma_picks: pd.DataFrame | None = None,
     df_phasenet_picks: pd.DataFrame | None = None,
     interval=300,
+    mode=''
 ):
     """
     We only consider the scale across the day.
     """
-    print('_add_das_picks...')
-    start_ymd, start_idx, start_sec = _process_midas_scenario(
+    logging.info('_add_das_picks...')
+    start_ymd, start_idx, start_sec = _process_scenario(
         starttime, interval=interval
     )
-    end_ymd, end_idx, end_sec = _process_midas_scenario(endtime, interval=interval)
-    window = [f'{start_ymd}:{interval*start_idx}_{interval*(start_idx+1)}.h5']
+    end_ymd, end_idx, end_sec = _process_scenario(endtime, interval=interval)
+    if mode == 'chiayi':
+        logging.info(f'start_ymd: {start_ymd}, idx = ({start_idx}, {end_idx}), sec = ({start_sec}, {end_sec})')
+        offset = 15
+        window = [f'{start_ymd}:{interval*start_idx + offset}_{interval*(start_idx+1 + offset)}.h5']
+        logging.info(f'window: {window}')
+    elif mode == 'midas':
+        window = [f'{start_ymd}:{interval*start_idx}_{interval*(start_idx+1)}.h5']
+    else:
+        raise ValueError('Use midas or chiayi.')
     same_index = True
     if start_idx != end_idx:
         # same day
-        next_window = f'{end_ymd}:{interval*(end_idx)}_{interval*(end_idx+1)}.h5'
+        if mode == 'chiayi':
+            offset = 15
+            next_window = f'{end_ymd}:{interval*(end_idx) + offset}_{interval*(end_idx+1) + offset}.h5'
+        elif mode == 'midas':
+            next_window = f'{end_ymd}:{interval*(end_idx)}_{interval*(end_idx+1)}.h5'
+        else:
+            raise ValueError('Use midas or chiayi.')
         window.append(next_window)
         same_index = False
     try:
@@ -1800,6 +1829,8 @@ def _add_das_picks(
         concatenated_data = np.empty((0, 0))
 
     nx, nt = concatenated_data.shape
+    dx = 2
+    dt = 0.01
     x = np.arange(nx) * dx
     t = np.arange(nt) * dt
 
@@ -1942,7 +1973,8 @@ def get_phasenet_das(
     get_station=lambda x: x,
     pretime=-30,
     posttime=60,
-    interval=300
+    interval=300,
+    mode=''
 ):
     """## Get PhaseNet DAS result.
     If you have no idea how to determine the start and end time, you can give an
@@ -1987,7 +2019,8 @@ def get_phasenet_das(
             prob_ax=prob_ax,
             h5_parent_dir=hdf5_parent_dir,
             df_phasenet_picks=df_phasenet,
-            interval=interval
+            interval=interval,
+            mode=mode
         )
     else:
         raise ValueError(
@@ -2009,6 +2042,7 @@ def plot_waveform_check(
     das_ax=None,
     seis_ax=None,
     interval=300,
+    mode=''
 ):
     if das_ax is None and seis_ax is None:
         fig = plt.figure(figsize=(8, 12))
@@ -2028,9 +2062,7 @@ def plot_waveform_check(
         and df_das_phasenet_picks is not None
         and h5_parent_dir is not None
     ):
-        print('')
-        print('dasdasdasdasdas')
-        print('')
+        logging.info('we are ready to add das picks.')
         _add_das_picks(
             starttime=starttime,
             endtime=end_time,
@@ -2039,6 +2071,7 @@ def plot_waveform_check(
             h5_parent_dir=h5_parent_dir,
             df_das_gamma_picks=df_das_gamma_picks,
             df_phasenet_picks=df_das_phasenet_picks,
+            mode=mode
         )
 
 

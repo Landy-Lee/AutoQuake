@@ -256,6 +256,8 @@ def plot_asso_map(
                     s=5,
                     zorder=3,
                 )
+                # print(station_mask)
+                # print(df_event_picks['station_id'].map(station_mask))
         das_gl = sub_ax.gridlines(draw_labels=True)
         das_gl.top_labels = False  # Turn off top labels
         das_gl.right_labels = False
@@ -287,7 +289,9 @@ def plot_asso(
     pretime=-30,
     posttime=60,
     use_das=False,
-    station_s=30
+    station_s=30,
+    das_interval=150,
+    mode='chiayi'
 ):
     """
     ## Plotting the gamma and h3dd info.
@@ -387,6 +391,7 @@ def plot_asso(
             starttime=starttime,
             endtime=endtime,
             df_picks=df_phasenet_picks,
+            station_mask=station_mask
         )
         print(df_das_phasenet_picks.head(1))
     else:
@@ -406,7 +411,8 @@ def plot_asso(
         event_total_seconds=event_dict['gamma']['event_total_seconds'],
         station_mask=station_mask,
     )
-    print(df_das_phasenet_picks.head(1))
+    logging.info(f'das gamma picks: {len(df_das_gamma_picks)}')
+    logging.info(f'das phasenet picks: {len(df_das_phasenet_picks)}')
     plot_waveform_check(
         sac_dict=sac_dict,
         starttime=starttime,
@@ -418,6 +424,8 @@ def plot_asso(
         h5_parent_dir=h5_parent_dir,
         das_ax=das_waveform_ax,
         seis_ax=seis_waveform_ax,
+        interval=das_interval,
+        mode=mode
     )
 
     plot_asso_map(
